@@ -144,3 +144,6 @@ vite.config.ts.timestamp-*
 node_modules/
 dist/
 .env
+
+# Generated TTS audio (runtime data)
+storage/

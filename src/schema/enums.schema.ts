@@ -12,3 +12,21 @@ export const otpPurposeEnum = pgEnum("otp_purpose", [
   "login",
   "password_reset",
 ]);
+
+export const ttsGenerationStatusEnum = pgEnum("tts_generation_status", [
+  "queued",
+  "processing",
+  "completed",
+  "failed",
+]);
+
+export const ttsVoiceModeEnum = pgEnum("tts_voice_mode", [
+  "default",
+  "clone",
+]);
+
+export const ttsAudioFormatEnum = pgEnum("tts_audio_format", [
+  "wav",
+  "mp3",
+  "ogg",
+]);

@@ -4,6 +4,7 @@ import { Router } from "express";
 import Auth from "./auth/auth.route";
 import User from "./user/user.route";
 import Tts from "./tts/tts.route";
+import Stt from "./stt/stt.route";
 
 const router = Router();
 
@@ -11,5 +12,6 @@ const router = Router();
 router.use("/auth", Auth);
 router.use("/user", User);
 router.use("/tts", Tts);
+router.use("/stt", Stt);
 
 export default router;

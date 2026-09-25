@@ -67,3 +67,64 @@ Keep `TTS_AUTO_PROCESS=false` while the GPU is offline. Creation then returns `2
 queued record. Set it to `true` to process during creation, or call the generate endpoint
 explicitly. Generated audio is private and stored under `TTS_AUDIO_DIRECTORY`; use persistent
 storage in production.
+
+## STT API
+
+The STT integration follows the EBMA ASR documentation: this API keeps the long-lived API
+key private and mints a short-lived browser token. The browser then sends microphone audio
+directly to the GPU WebSocket. Raw audio does not pass through or get stored by this server.
+
+| Method | Route | Purpose |
+|---|---|---|
+| `GET` | `/api/v1/stt/options` | Languages, modes, limits, and audio requirements |
+| `GET` | `/api/v1/stt/health` | Authenticated GPU health and load check |
+| `POST` | `/api/v1/stt/sessions` | Create a transcription session |
+| `GET` | `/api/v1/stt/sessions` | List the signed-in user's transcription history |
+| `GET` | `/api/v1/stt/sessions/:session_uuid` | Get a session and its final segments |
+| `PATCH` | `/api/v1/stt/sessions/:session_uuid` | Edit a created or failed session |
+| `DELETE` | `/api/v1/stt/sessions/:session_uuid` | Delete a session and its segments |
+| `POST` | `/api/v1/stt/sessions/:session_uuid/token` | Mint a short-lived WebSocket token |
+| `POST` | `/api/v1/stt/sessions/:session_uuid/start` | Mark the session streaming after `ready` |
+| `POST` | `/api/v1/stt/sessions/:session_uuid/segments` | Save an idempotent WebSocket `final` event |
+| `POST` | `/api/v1/stt/sessions/:session_uuid/finish` | Mark the session completed or failed |
+
+Create a session:
+
+```json
+{
+  "language": "hi",
+  "mode": "native",
+  "sampleRate": 48000,
+  "endSilenceMs": 700,
+  "partials": true
+}
+```
+
+The create and token responses include the exact WebSocket `startMessage`. After receiving
+the token, connect to `connection.wsUrl + "?token=" + connection.token`, wait for `ready`,
+send the supplied `startMessage`, and then send 16-bit signed little-endian mono PCM frames.
+
+When a `final` event arrives, send the event unchanged to the segments endpoint:
+
+```json
+{
+  "type": "final",
+  "seg": 1,
+  "text": "भूमि अधिग्रहण",
+  "lang": "hi",
+  "t0": 1.09,
+  "t1": 2.4,
+  "audio_s": 1.31,
+  "decode_ms": 620,
+  "latency_ms": 1330,
+  "reason": "pause"
+}
+```
+
+Segment writes are idempotent on session plus `seg`, so retrying the same event does not
+duplicate transcript text. Partial events are intentionally not persisted because the model
+may revise them.
+
+The model supports `native`, `mixed`, and `romanized` output. The current frontend option
+called “English translation” is not supported by the supplied ASR contract and must not be
+sent as a mode.

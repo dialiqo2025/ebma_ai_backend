@@ -30,3 +30,17 @@ export const ttsAudioFormatEnum = pgEnum("tts_audio_format", [
   "mp3",
   "ogg",
 ]);
+
+export const sttSessionStatusEnum = pgEnum("stt_session_status", [
+  "created",
+  "connecting",
+  "streaming",
+  "completed",
+  "failed",
+]);
+
+export const sttOutputModeEnum = pgEnum("stt_output_mode", [
+  "native",
+  "mixed",
+  "romanized",
+]);

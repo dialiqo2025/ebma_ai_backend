@@ -34,6 +34,11 @@ const timeoutMs = () => {
   return Number.isInteger(configured) && configured > 0 ? configured : 10_000;
 };
 
+const uploadTimeoutMs = () => {
+  const configured = Number(process.env.EBMA_ASR_UPLOAD_TIMEOUT_MS);
+  return Number.isInteger(configured) && configured > 0 ? configured : 300_000;
+};
+
 const modelConfiguration = () => {
   const baseUrl = process.env.EBMA_ASR_BACKEND_URL?.trim().replace(/\/+$/, "");
   const apiKey = process.env.EBMA_ASR_API_KEY?.trim();
@@ -49,7 +54,11 @@ const modelConfiguration = () => {
   return { baseUrl, apiKey };
 };
 
-const modelFetch = async (path: string, init: RequestInit) => {
+const modelFetch = async (
+  path: string,
+  init: RequestInit,
+  timeout = timeoutMs(),
+) => {
   const { baseUrl, apiKey } = modelConfiguration();
 
   try {
@@ -59,7 +68,7 @@ const modelFetch = async (path: string, init: RequestInit) => {
         Authorization: `Bearer ${apiKey}`,
         ...init.headers,
       },
-      signal: AbortSignal.timeout(timeoutMs()),
+      signal: AbortSignal.timeout(timeout),
     });
   } catch (error) {
     const timedOut = error instanceof Error && error.name === "TimeoutError";
@@ -109,17 +118,33 @@ const modelErrorFromResponse = async (response: Response) => {
 
   if (response.status === 429) {
     return new SttModelError(
-      "The EBMA ASR backend rate limit was reached",
-      "model_rate_limited",
+      upstreamMessage || "The EBMA ASR backend rate limit was reached",
+      upstreamCode === "too_many_jobs" ? "too_many_jobs" : "model_rate_limited",
       429,
+    );
+  }
+
+  if (response.status === 413) {
+    return new SttModelError(
+      upstreamMessage || "The uploaded file is too large for the ASR backend",
+      "payload_too_large",
+      413,
+    );
+  }
+
+  if (response.status === 501) {
+    return new SttModelError(
+      upstreamMessage || "Speaker identification is not available on this ASR backend",
+      "diarization_unavailable",
+      501,
     );
   }
 
   if (response.status === 404) {
     return new SttModelError(
-      "The EBMA ASR token endpoint was not found; check EBMA_ASR_BACKEND_URL",
-      "model_endpoint_not_found",
-      502,
+      upstreamMessage || "The EBMA ASR resource was not found",
+      "model_not_found",
+      404,
     );
   }
 
@@ -181,4 +206,96 @@ export const getSttModelHealth = async () => {
       502,
     );
   }
+};
+
+const jobCreatedValidator = z.object({
+  job_id: z.string().min(1),
+  status: z.string().optional(),
+  status_url: z.string().optional(),
+});
+
+export type CreateTranscriptionJobInput = {
+  file: Buffer;
+  filename: string;
+  contentType?: string;
+  language: string;
+  diarize: boolean;
+  speakers?: number;
+};
+
+export const createTranscriptionJob = async (input: CreateTranscriptionJobInput) => {
+  const query = new URLSearchParams({
+    lang: input.language,
+    filename: input.filename,
+  });
+  if (input.diarize) query.set("diarize", "1");
+  if (input.speakers !== undefined) query.set("speakers", String(input.speakers));
+
+  const response = await modelFetch(
+    `/v1/transcriptions?${query.toString()}`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": input.contentType || "application/octet-stream",
+      },
+      body: new Uint8Array(input.file),
+    },
+    uploadTimeoutMs(),
+  );
+
+  if (!response.ok) throw await modelErrorFromResponse(response);
+
+  try {
+    return jobCreatedValidator.parse(await response.json());
+  } catch {
+    throw new SttModelError(
+      "The EBMA ASR backend returned an invalid transcription job response",
+      "invalid_model_response",
+      502,
+    );
+  }
+};
+
+export const getTranscriptionJob = async (jobId: string) => {
+  const response = await modelFetch(
+    `/v1/transcriptions/${encodeURIComponent(jobId)}`,
+    { method: "GET" },
+  );
+  if (!response.ok) throw await modelErrorFromResponse(response);
+
+  try {
+    return (await response.json()) as Record<string, unknown>;
+  } catch {
+    throw new SttModelError(
+      "The EBMA ASR backend returned an invalid transcription status response",
+      "invalid_model_response",
+      502,
+    );
+  }
+};
+
+export const downloadTranscriptionJob = async (
+  jobId: string,
+  format: "txt" | "srt" | "vtt",
+) => {
+  const response = await modelFetch(
+    `/v1/transcriptions/${encodeURIComponent(jobId)}?format=${format}`,
+    { method: "GET" },
+  );
+  if (!response.ok) throw await modelErrorFromResponse(response);
+
+  const contentType =
+    response.headers.get("content-type")?.split(";")[0]?.trim() || "text/plain";
+  const content = Buffer.from(await response.arrayBuffer());
+  return { content, contentType, format };
+};
+
+export const deleteTranscriptionJob = async (jobId: string) => {
+  const response = await modelFetch(
+    `/v1/transcriptions/${encodeURIComponent(jobId)}`,
+    { method: "DELETE" },
+  );
+  // 204 success, or 404 if already gone — treat both as ok for cleanup.
+  if (response.status === 204 || response.status === 404) return;
+  if (!response.ok) throw await modelErrorFromResponse(response);
 };

@@ -1,24 +1,33 @@
 import { and, asc, desc, eq, ilike, sql } from "drizzle-orm";
 import { db } from "../../config/database/connection.database";
-import { SttSegments, SttSessions } from "../../schema";
+import { SttSegments, SttSessions, SttTranscriptions } from "../../schema";
 import { HttpStatusCodes as Code } from "../../utils/httpType.util";
 import { GenResObj } from "../../utils/responseFormat.util";
 import {
   isSttModelConfigured,
+  mapProviderTranscriptionStatus,
+  maxUploadBytes,
   serializeSttSegment,
   serializeSttSession,
+  serializeSttTranscription,
   STT_LANGUAGES,
   toSttStartMessage,
 } from "./stt.helper";
 import {
+  createTranscriptionJob,
+  deleteTranscriptionJob,
+  downloadTranscriptionJob,
   getSttModelHealth,
+  getTranscriptionJob,
   requestSttBrowserToken,
   SttModelError,
 } from "./stt.model";
 import type {
   CreateSttSession,
+  CreateSttTranscription,
   FinishSttSession,
   ListSttSessions,
+  ListSttTranscriptions,
   SttFinalSegment,
   SttTokenRequest,
   UpdateSttSession,
@@ -511,4 +520,370 @@ export const getSttOptions = () =>
       channels: 1,
       recommendedFrameMs: { min: 20, max: 100, ideal: 50 },
     },
+    fileTranscription: {
+      enabled: true,
+      maxUploadBytes: maxUploadBytes(),
+      maxAudioMinutes: 120,
+      acceptedFormats: [
+        "wav",
+        "mp3",
+        "m4a",
+        "aac",
+        "flac",
+        "ogg",
+        "opus",
+        "webm",
+        "mp4",
+      ],
+      downloadFormats: ["txt", "srt", "vtt"],
+      diarizeDefault: false,
+      speakers: { min: 1, max: 20 },
+      pollIntervalMs: 1500,
+    },
   });
+
+const findOwnedTranscription = async (
+  transcriptionUuid: string,
+  userUuid: string,
+) => {
+  const [row] = await db
+    .select()
+    .from(SttTranscriptions)
+    .where(
+      and(
+        eq(SttTranscriptions.transcription_uuid, transcriptionUuid),
+        eq(SttTranscriptions.user_uuid, userUuid),
+      ),
+    )
+    .limit(1);
+
+  return row;
+};
+
+const applyProviderJobSnapshot = async (
+  row: typeof SttTranscriptions.$inferSelect,
+  job: Record<string, unknown>,
+) => {
+  const status = mapProviderTranscriptionStatus(job.status);
+  const result =
+    status === "completed" && job.result && typeof job.result === "object"
+      ? (job.result as Record<string, unknown>)
+      : null;
+  const error =
+    job.error && typeof job.error === "object"
+      ? (job.error as { code?: string; message?: string })
+      : null;
+
+  const [updated] = await db
+    .update(SttTranscriptions)
+    .set({
+      status,
+      stage: typeof job.stage === "string" ? job.stage : row.stage,
+      progress:
+        typeof job.progress === "number"
+          ? Math.max(0, Math.min(1, job.progress))
+          : row.progress,
+      audio_seconds:
+        typeof job.audio_seconds === "number"
+          ? job.audio_seconds
+          : typeof result?.duration_s === "number"
+            ? result.duration_s
+            : row.audio_seconds,
+      transcript:
+        typeof result?.text === "string"
+          ? result.text
+          : status === "completed"
+            ? row.transcript
+            : row.transcript,
+      result_json: result ?? row.result_json,
+      error_code:
+        status === "failed" ? error?.code ?? row.error_code ?? "transcription_failed" : null,
+      error_message:
+        status === "failed"
+          ? error?.message ?? row.error_message ?? "Transcription failed"
+          : null,
+      completed_at:
+        status === "completed" || status === "failed" || status === "cancelled"
+          ? row.completed_at ?? new Date()
+          : null,
+      updated_at: new Date(),
+    })
+    .where(eq(SttTranscriptions.transcription_uuid, row.transcription_uuid))
+    .returning();
+
+  return updated ?? row;
+};
+
+export const createSttTranscription = async (
+  userUuid: string,
+  payload: CreateSttTranscription,
+  file: Express.Multer.File,
+) => {
+  if (!file?.buffer?.length) {
+    return GenResObj(Code.BAD_REQUEST, false, "Audio file is required");
+  }
+
+  if (file.size > maxUploadBytes()) {
+    return GenResObj(Code.REQUEST_TOO_LONG, false, "Uploaded file exceeds the size limit");
+  }
+
+  try {
+    const created = await createTranscriptionJob({
+      file: file.buffer,
+      filename: file.originalname || "recording",
+      contentType: file.mimetype,
+      language: payload.language,
+      diarize: payload.diarize,
+      ...(payload.speakers !== undefined ? { speakers: payload.speakers } : {}),
+    });
+
+    const [row] = await db
+      .insert(SttTranscriptions)
+      .values({
+        user_uuid: userUuid,
+        provider_job_id: created.job_id,
+        original_filename: file.originalname || "recording",
+        content_type: file.mimetype || null,
+        file_size_bytes: file.size,
+        language: payload.language,
+        diarize: payload.diarize,
+        speakers: payload.speakers ?? null,
+        status: mapProviderTranscriptionStatus(created.status ?? "queued"),
+      })
+      .returning();
+
+    if (!row) throw new Error("STT transcription creation failed");
+
+    return GenResObj(
+      Code.ACCEPTED,
+      true,
+      "Transcription job started successfully",
+      serializeSttTranscription(row),
+    );
+  } catch (error) {
+    const modelError =
+      error instanceof SttModelError
+        ? error
+        : new SttModelError(
+            "STT transcription upload failed",
+            "transcription_upload_failed",
+            500,
+          );
+
+    if (!(error instanceof SttModelError)) {
+      console.error("Unexpected STT transcription upload error:", error);
+    }
+
+    return GenResObj(modelError.httpStatus, false, modelError.message, {
+      error: { code: modelError.code, message: modelError.message },
+    });
+  }
+};
+
+export const listSttTranscriptions = async (
+  userUuid: string,
+  query: ListSttTranscriptions,
+) => {
+  const offset = (query.page - 1) * query.page_size;
+  const filters = and(
+    eq(SttTranscriptions.user_uuid, userUuid),
+    query.status ? eq(SttTranscriptions.status, query.status) : undefined,
+    query.language ? eq(SttTranscriptions.language, query.language) : undefined,
+    query.search
+      ? ilike(SttTranscriptions.original_filename, `%${query.search}%`)
+      : undefined,
+  );
+
+  const [countRow] = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(SttTranscriptions)
+    .where(filters);
+
+  const rows = await db
+    .select()
+    .from(SttTranscriptions)
+    .where(filters)
+    .orderBy(desc(SttTranscriptions.created_at))
+    .limit(query.page_size)
+    .offset(offset);
+
+  const totalCount = Number(countRow?.count ?? 0);
+  const totalPages = Math.ceil(totalCount / query.page_size);
+
+  return GenResObj(Code.OK, true, "STT transcriptions fetched successfully", {
+    items: rows.map(serializeSttTranscription),
+    pagination: {
+      page: query.page,
+      pageSize: query.page_size,
+      totalCount,
+      totalPages,
+      hasNextPage: query.page < totalPages,
+    },
+  });
+};
+
+export const getSttTranscription = async (
+  transcriptionUuid: string,
+  userUuid: string,
+) => {
+  const row = await findOwnedTranscription(transcriptionUuid, userUuid);
+  if (!row) return GenResObj(Code.NOT_FOUND, false, "STT transcription not found");
+
+  if (row.status === "queued" || row.status === "processing") {
+    try {
+      const job = await getTranscriptionJob(row.provider_job_id);
+      const synced = await applyProviderJobSnapshot(row, job);
+      return GenResObj(
+        Code.OK,
+        true,
+        "STT transcription fetched successfully",
+        serializeSttTranscription(synced),
+      );
+    } catch (error) {
+      if (error instanceof SttModelError && error.httpStatus === 404) {
+        const [failed] = await db
+          .update(SttTranscriptions)
+          .set({
+            status: "failed",
+            error_code: "provider_job_missing",
+            error_message: "The upstream transcription job was not found",
+            completed_at: new Date(),
+            updated_at: new Date(),
+          })
+          .where(eq(SttTranscriptions.transcription_uuid, transcriptionUuid))
+          .returning();
+
+        return GenResObj(
+          Code.OK,
+          true,
+          "STT transcription fetched successfully",
+          serializeSttTranscription(failed ?? row),
+        );
+      }
+
+      const modelError =
+        error instanceof SttModelError
+          ? error
+          : new SttModelError(
+              "Failed to refresh transcription status",
+              "transcription_refresh_failed",
+              500,
+            );
+
+      return GenResObj(modelError.httpStatus, false, modelError.message, {
+        transcription: serializeSttTranscription(row),
+        error: { code: modelError.code, message: modelError.message },
+      });
+    }
+  }
+
+  return GenResObj(
+    Code.OK,
+    true,
+    "STT transcription fetched successfully",
+    serializeSttTranscription(row),
+  );
+};
+
+export const downloadSttTranscription = async (
+  transcriptionUuid: string,
+  userUuid: string,
+  format: "txt" | "srt" | "vtt",
+) => {
+  const row = await findOwnedTranscription(transcriptionUuid, userUuid);
+  if (!row) {
+    return { response: GenResObj(Code.NOT_FOUND, false, "STT transcription not found") };
+  }
+
+  if (row.status !== "completed") {
+    // Refresh once in case the job finished since last poll.
+    if (row.status === "queued" || row.status === "processing") {
+      const refreshed = await getSttTranscription(transcriptionUuid, userUuid);
+      if (!refreshed.data.success) return { response: refreshed };
+      const latest = refreshed.data.data;
+      if (latest?.status !== "completed") {
+        return {
+          response: GenResObj(
+            Code.CONFLICT,
+            false,
+            "Transcript download is not ready yet",
+            latest,
+          ),
+        };
+      }
+    } else {
+      return {
+        response: GenResObj(
+          Code.CONFLICT,
+          false,
+          "Transcript download is only available for completed jobs",
+          serializeSttTranscription(row),
+        ),
+      };
+    }
+  }
+
+  try {
+    const file = await downloadTranscriptionJob(row.provider_job_id, format);
+    const safeName = (row.original_filename || "transcript").replace(/\.[^.]+$/, "");
+    return {
+      file: {
+        ...file,
+        fileName: `${safeName}.${format}`,
+      },
+    };
+  } catch (error) {
+    const modelError =
+      error instanceof SttModelError
+        ? error
+        : new SttModelError(
+            "Failed to download transcription",
+            "transcription_download_failed",
+            500,
+          );
+
+    return {
+      response: GenResObj(modelError.httpStatus, false, modelError.message, {
+        error: { code: modelError.code, message: modelError.message },
+      }),
+    };
+  }
+};
+
+export const deleteSttTranscription = async (
+  transcriptionUuid: string,
+  userUuid: string,
+) => {
+  const row = await findOwnedTranscription(transcriptionUuid, userUuid);
+  if (!row) return GenResObj(Code.NOT_FOUND, false, "STT transcription not found");
+
+  try {
+    await deleteTranscriptionJob(row.provider_job_id);
+  } catch (error) {
+    // Still delete locally if upstream is already gone.
+    if (!(error instanceof SttModelError && error.httpStatus === 404)) {
+      const modelError =
+        error instanceof SttModelError
+          ? error
+          : new SttModelError(
+              "Failed to cancel upstream transcription job",
+              "transcription_delete_failed",
+              500,
+            );
+      return GenResObj(modelError.httpStatus, false, modelError.message);
+    }
+  }
+
+  await db
+    .delete(SttTranscriptions)
+    .where(
+      and(
+        eq(SttTranscriptions.transcription_uuid, transcriptionUuid),
+        eq(SttTranscriptions.user_uuid, userUuid),
+      ),
+    );
+
+  return GenResObj(Code.OK, true, "STT transcription deleted successfully", {
+    transcriptionUuid,
+  });
+};

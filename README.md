@@ -95,6 +95,11 @@ directly to the GPU WebSocket. Raw audio does not pass through or get stored by 
 | `POST` | `/api/v1/stt/sessions/:session_uuid/start` | Mark the session streaming after `ready` |
 | `POST` | `/api/v1/stt/sessions/:session_uuid/segments` | Save an idempotent WebSocket `final` event |
 | `POST` | `/api/v1/stt/sessions/:session_uuid/finish` | Mark the session completed or failed |
+| `POST` | `/api/v1/stt/transcriptions` | Upload a recording (multipart `file`) and start a job |
+| `GET` | `/api/v1/stt/transcriptions` | List file transcription jobs |
+| `GET` | `/api/v1/stt/transcriptions/:transcription_uuid` | Poll job status / read transcript |
+| `GET` | `/api/v1/stt/transcriptions/:transcription_uuid/download` | Download `txt` / `srt` / `vtt` |
+| `DELETE` | `/api/v1/stt/transcriptions/:transcription_uuid` | Cancel or delete a job |
 
 Create a session:
 
@@ -137,3 +142,23 @@ may revise them.
 The model supports `native`, `mixed`, and `romanized` output. The current frontend option
 called “English translation” is not supported by the supplied ASR contract and must not be
 sent as a mode.
+
+## STT file transcription (upload → transcript)
+
+Besides live WebSocket STT, this API proxies EBMA long-form file jobs. The GPU API key stays
+on the server. The browser uploads to this management API only.
+
+```text
+POST multipart file  ->  202 transcription  ->  poll GET until completed  ->  read text / download
+```
+
+Upload (`multipart/form-data`):
+
+- field `file` (required): audio or video
+- fields/query: `language` (default `hi`), `diarize` (`true`/`1`), `speakers` (1–20, optional)
+
+This server forwards the raw bytes to `POST {EBMA_ASR_BACKEND_URL}/v1/transcriptions` and
+stores ownership + cached results in `stt_transcriptions`. Poll
+`GET /api/v1/stt/transcriptions/:id` every ~1.5s while `status` is `queued` or `processing`.
+When `completed`, `transcript` and `result` (segments/speakers) are available. Download with
+`?format=txt|srt|vtt`.

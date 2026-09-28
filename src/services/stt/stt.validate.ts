@@ -117,3 +117,37 @@ export type ListSttSessions = z.infer<typeof listSttSessionsValidator>;
 export type SttTokenRequest = z.infer<typeof sttTokenRequestValidator>;
 export type SttFinalSegment = z.infer<typeof sttFinalSegmentValidator>;
 export type FinishSttSession = z.infer<typeof finishSttSessionValidator>;
+
+export const createSttTranscriptionValidator = z
+  .object({
+    language: languageValidator.default("hi"),
+    diarize: z
+      .union([z.boolean(), z.enum(["true", "false", "1", "0"])])
+      .transform((value) => value === true || value === "true" || value === "1")
+      .default(false),
+    speakers: z.preprocess(
+      (value) => (value === "" || value === undefined || value === null ? undefined : value),
+      z.coerce.number().int().min(1).max(20).optional(),
+    ),
+  })
+  .strict();
+
+export const listSttTranscriptionsValidator = z.object({
+  page: z.coerce.number().int().min(1).default(1),
+  page_size: z.coerce.number().int().min(1).max(100).default(10),
+  status: z
+    .enum(["queued", "processing", "completed", "failed", "cancelled"])
+    .optional(),
+  language: languageValidator.optional(),
+  search: z.string().trim().max(100).optional(),
+});
+
+export const sttTranscriptionUuidValidator = z.string().uuid("Invalid transcription UUID");
+
+export const sttTranscriptionDownloadValidator = z.object({
+  format: z.enum(["txt", "srt", "vtt"]).default("txt"),
+});
+
+export type CreateSttTranscription = z.infer<typeof createSttTranscriptionValidator>;
+export type ListSttTranscriptions = z.infer<typeof listSttTranscriptionsValidator>;
+export type SttTranscriptionDownload = z.infer<typeof sttTranscriptionDownloadValidator>;

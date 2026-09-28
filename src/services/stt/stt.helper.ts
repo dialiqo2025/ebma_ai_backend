@@ -78,3 +78,55 @@ export const toSttStartMessage = (session: any) => ({
   end_silence_ms: session.end_silence_ms,
   partials: session.partials,
 });
+
+export const mapProviderTranscriptionStatus = (
+  status: unknown,
+): "queued" | "processing" | "completed" | "failed" | "cancelled" => {
+  switch (String(status || "").toLowerCase()) {
+    case "done":
+    case "completed":
+      return "completed";
+    case "failed":
+      return "failed";
+    case "cancelled":
+    case "canceled":
+      return "cancelled";
+    case "processing":
+    case "running":
+      return "processing";
+    case "queued":
+    default:
+      return "queued";
+  }
+};
+
+export const serializeSttTranscription = (row: any) => ({
+  transcriptionUuid: row.transcription_uuid,
+  providerJobId: row.provider_job_id,
+  filename: row.original_filename,
+  contentType: row.content_type,
+  fileSizeBytes: row.file_size_bytes,
+  language: row.language,
+  diarize: row.diarize,
+  speakers: row.speakers,
+  status: row.status,
+  stage: row.stage,
+  progress: row.progress,
+  audioSeconds: row.audio_seconds,
+  transcript: row.transcript,
+  result: row.result_json ?? null,
+  error:
+    row.error_code || row.error_message
+      ? { code: row.error_code, message: row.error_message }
+      : null,
+  completedAt: row.completed_at,
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+});
+
+export const maxUploadBytes = () => {
+  const configured = Number(process.env.STT_MAX_UPLOAD_BYTES);
+  return Number.isInteger(configured) && configured > 0
+    ? configured
+    : 300 * 1024 * 1024;
+};

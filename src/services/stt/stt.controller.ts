@@ -3,11 +3,15 @@ import type { TResponse } from "../../utils/types.util";
 import * as SttProvider from "./stt.provider";
 import {
   createSttSessionValidator,
+  createSttTranscriptionValidator,
   finishSttSessionValidator,
   listSttSessionsValidator,
+  listSttTranscriptionsValidator,
   sttFinalSegmentValidator,
   sttSessionUuidValidator,
   sttTokenRequestValidator,
+  sttTranscriptionDownloadValidator,
+  sttTranscriptionUuidValidator,
   updateSttSessionValidator,
 } from "./stt.validate";
 
@@ -151,6 +155,102 @@ export const SttController = {
           sessionUuid,
           userUuidFromRequest(req),
           payload,
+        ),
+      );
+    } catch (error) {
+      next(error);
+    }
+  },
+
+  createTranscription: async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const payload = createSttTranscriptionValidator.parse({
+        language: req.body?.language ?? req.query?.language,
+        diarize: req.body?.diarize ?? req.query?.diarize,
+        speakers: req.body?.speakers ?? req.query?.speakers,
+      });
+      sendProviderResponse(
+        res,
+        await SttProvider.createSttTranscription(
+          userUuidFromRequest(req),
+          payload,
+          req.file as Express.Multer.File,
+        ),
+      );
+    } catch (error) {
+      next(error);
+    }
+  },
+
+  listTranscriptions: async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const query = listSttTranscriptionsValidator.parse(req.query);
+      sendProviderResponse(
+        res,
+        await SttProvider.listSttTranscriptions(userUuidFromRequest(req), query),
+      );
+    } catch (error) {
+      next(error);
+    }
+  },
+
+  getTranscription: async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const transcriptionUuid = sttTranscriptionUuidValidator.parse(
+        req.params.transcription_uuid,
+      );
+      sendProviderResponse(
+        res,
+        await SttProvider.getSttTranscription(
+          transcriptionUuid,
+          userUuidFromRequest(req),
+        ),
+      );
+    } catch (error) {
+      next(error);
+    }
+  },
+
+  downloadTranscription: async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const transcriptionUuid = sttTranscriptionUuidValidator.parse(
+        req.params.transcription_uuid,
+      );
+      const { format } = sttTranscriptionDownloadValidator.parse(req.query);
+      const result = await SttProvider.downloadSttTranscription(
+        transcriptionUuid,
+        userUuidFromRequest(req),
+        format,
+      );
+
+      if (result.response) {
+        sendProviderResponse(res, result.response);
+        return;
+      }
+
+      if (!result.file) throw new Error("Transcription download returned no file");
+
+      res.setHeader("Content-Type", result.file.contentType);
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename="${result.file.fileName}"`,
+      );
+      res.send(result.file.content);
+    } catch (error) {
+      next(error);
+    }
+  },
+
+  removeTranscription: async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const transcriptionUuid = sttTranscriptionUuidValidator.parse(
+        req.params.transcription_uuid,
+      );
+      sendProviderResponse(
+        res,
+        await SttProvider.deleteSttTranscription(
+          transcriptionUuid,
+          userUuidFromRequest(req),
         ),
       );
     } catch (error) {

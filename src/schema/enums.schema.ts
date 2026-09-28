@@ -44,3 +44,11 @@ export const sttOutputModeEnum = pgEnum("stt_output_mode", [
   "mixed",
   "romanized",
 ]);
+
+export const sttTranscriptionStatusEnum = pgEnum("stt_transcription_status", [
+  "queued",
+  "processing",
+  "completed",
+  "failed",
+  "cancelled",
+]);

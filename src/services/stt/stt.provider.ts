@@ -3,6 +3,7 @@ import { db } from "../../config/database/connection.database";
 import { SttSegments, SttSessions } from "../../schema";
 import { HttpStatusCodes as Code } from "../../utils/httpType.util";
 import { GenResObj } from "../../utils/responseFormat.util";
+import { prepareTextForTts } from "../llm/llm.provider";
 import {
   isSttModelConfigured,
   serializeSttSegment,
@@ -397,11 +398,19 @@ export const addSttFinalSegment = async (
       0,
     );
 
+    const llmPreparedText = process.env.LLM_MODEL_ENDPOINT && process.env.LLM_API_KEY
+      ? (await prepareTextForTts({
+          text: transcript,
+          language: session.language,
+          style: "natural",
+        })).data?.data?.text
+      : transcript;
+
     const [updatedSession] = await transaction
       .update(SttSessions)
       .set({
         status: "streaming",
-        transcript,
+        transcript: typeof llmPreparedText === "string" ? llmPreparedText : transcript,
         phrase_count: segments.length,
         audio_duration_seconds: audioDurationSeconds,
         started_at: session.started_at ?? new Date(),

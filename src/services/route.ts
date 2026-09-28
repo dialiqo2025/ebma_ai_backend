@@ -5,6 +5,8 @@ import Auth from "./auth/auth.route";
 import User from "./user/user.route";
 import Tts from "./tts/tts.route";
 import Stt from "./stt/stt.route";
+import Llm from "./llm/llm.route";
+import Chat from "./chat/chat.route";
 
 const router = Router();
 
@@ -13,5 +15,7 @@ router.use("/auth", Auth);
 router.use("/user", User);
 router.use("/tts", Tts);
 router.use("/stt", Stt);
+router.use("/llm", Llm);
+router.use("/chat", Chat);
 
 export default router;

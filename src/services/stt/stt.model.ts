@@ -73,12 +73,20 @@ const modelFetch = async (path: string, init: RequestInit) => {
 
 const modelErrorFromResponse = async (response: Response) => {
   let upstreamCode: string | undefined;
+  let upstreamMessage: string | undefined;
   try {
     const payload = await response.json();
     upstreamCode = payload?.error?.code;
+    upstreamMessage = payload?.error?.message;
   } catch {
     // The public response intentionally does not expose raw upstream content.
   }
+
+  console.error("EBMA ASR request rejected", {
+    status: response.status,
+    code: upstreamCode,
+    message: upstreamMessage,
+  });
 
   if (response.status === 401) {
     return new SttModelError(
@@ -92,6 +100,30 @@ const modelErrorFromResponse = async (response: Response) => {
     return new SttModelError(
       "The EBMA ASR backend is not ready",
       "model_unavailable",
+      503,
+    );
+  }
+
+  if (response.status === 429) {
+    return new SttModelError(
+      "The EBMA ASR backend rate limit was reached",
+      "model_rate_limited",
+      429,
+    );
+  }
+
+  if (response.status === 404) {
+    return new SttModelError(
+      "The EBMA ASR token endpoint was not found; check EBMA_ASR_BACKEND_URL",
+      "model_endpoint_not_found",
+      502,
+    );
+  }
+
+  if (response.status >= 500) {
+    return new SttModelError(
+      "The EBMA ASR backend returned a server error",
+      "model_server_error",
       503,
     );
   }

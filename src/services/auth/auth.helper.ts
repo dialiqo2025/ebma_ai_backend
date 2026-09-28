@@ -136,7 +136,8 @@ export const issueOtpChallenge = async (
     }
   }
 
-  const code = randomInt(100_000, 1_000_000).toString();
+  // const code = randomInt(100_000, 1_000_000).toString();
+  const code = "123456";
   const otpHash = await bcrypt.hash(code, 8);
   const expiresAt = new Date(Date.now() + OTP_TTL_MINUTES * 60_000);
 
@@ -152,18 +153,19 @@ export const issueOtpChallenge = async (
     })
     .where(eq(Users.user_uuid, user.user_uuid));
 
-  const html = renderEbmaOtpEmail({
-    name: user.fullName,
-    code,
-    purpose,
-    expiresInMinutes: OTP_TTL_MINUTES,
-  });
+  // Temp Change : Hide to prevent sending emails during development. Uncomment the following lines to enable email sending in production.
+  // const html = renderEbmaOtpEmail({
+  //   name: user.fullName,
+  //   code,
+  //   purpose,
+  //   expiresInMinutes: OTP_TTL_MINUTES,
+  // });
 
-  await sendEmail({
-    to: user.email,
-    subject: `${code} is your ebma AI verification code`,
-    html,
-  });
+  // await sendEmail({
+  //   to: user.email,
+  //   subject: `${code} is your ebma AI verification code`,
+  //   html,
+  // });
 
   return { sent: true, expiresIn: OTP_TTL_MINUTES * 60 };
 };

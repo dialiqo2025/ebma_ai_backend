@@ -79,7 +79,10 @@ const modelErrorFromResponse = async (response: Response) => {
     upstreamCode = payload?.error?.code;
     upstreamMessage = payload?.error?.message;
   } catch {
-    // The public response intentionally does not expose raw upstream content.
+    console.error("EBMA ASR upstream error (non-JSON):", {
+      status: response.status,
+      url: response.url,
+    });
   }
 
   console.error("EBMA ASR request rejected", {
@@ -129,7 +132,9 @@ const modelErrorFromResponse = async (response: Response) => {
   }
 
   return new SttModelError(
-    "The EBMA ASR backend rejected the request",
+    upstreamMessage
+      ? `The EBMA ASR backend rejected the request: ${upstreamMessage}`
+      : "The EBMA ASR backend rejected the request",
     upstreamCode === "bad_request" ? "invalid_model_request" : "model_request_failed",
     502,
   );

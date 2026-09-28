@@ -1,0 +1,166 @@
+openapi: 3.0.3
+info:
+  title: EBMA ASR backend
+  version: "1"
+  description: |
+    Live speech-to-text for 27 Indian languages.
+
+    This file describes the two HTTP endpoints. The streaming API is a **WebSocket** at `/ws`, which OpenAPI cannot describe;
+    see `api-reference.md` for its messages, and `integration-guide.md` for a walk-through.
+
+    Credentials: an **API key** (server side only) and short-lived **tokens** for browsers.
+servers:
+  - url: https://{backendHost}
+    variables:
+      backendHost:
+        default: backend.example.com
+        description: The backend host you were given.
+tags:
+  - name: Health
+  - name: Tokens
+paths:
+  /health:
+    get:
+      tags: [Health]
+      summary: Is the backend up? Load figures if you send your API key.
+      security:
+        - {}
+        - apiKey: []
+      responses:
+        "200":
+          description: Always 200 while the backend runs.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+              examples:
+                anonymous:
+                  value: { status: ok }
+                withApiKey:
+                  value:
+                    status: ok
+                    active_sessions: 1
+                    max_sessions: 4
+                    queue_depth: 0
+                    languages: [hi, en, ta]
+                    modes: [native, mixed, romanized]
+  /v1/tokens:
+    post:
+      tags: [Tokens]
+      summary: Trade your API key for a short-lived token (call from your server, never from a browser).
+      description: |
+        The token lets **one browser session** open the streaming WebSocket: `wss://<backend>/ws?token=<token>`.
+        It is only checked when the connection opens. This endpoint sends no CORS headers on purpose.
+      security:
+        - apiKey: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TokenRequest"
+            example: { subject: user-42, ttl_seconds: 300, lang: hi }
+      responses:
+        "200":
+          description: A token.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenResponse"
+        "400":
+          description: The body is not a JSON object, or a field is invalid.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: Missing or wrong API key.
+          headers:
+            WWW-Authenticate:
+              schema: { type: string, example: Bearer }
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: The backend has no API keys configured (tell the operator).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+components:
+  securitySchemes:
+    apiKey:
+      type: http
+      scheme: bearer
+      description: "Your API key, sent as `Authorization: Bearer <key>`. Keep it on your server."
+  schemas:
+    Health:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+        active_sessions:
+          type: integer
+          description: "Only with an API key."
+        max_sessions:
+          type: integer
+          description: "Only with an API key."
+        queue_depth:
+          type: integer
+          description: "Phrases waiting for the GPU. Only with an API key."
+        languages:
+          type: array
+          items:
+            type: string
+          description: "Only with an API key."
+        modes:
+          type: array
+          items:
+            type: string
+          description: "Only with an API key."
+    TokenRequest:
+      type: object
+      properties:
+        subject:
+          type: string
+          pattern: '^[A-Za-z0-9_.:@-]{1,64}$'
+          description: Your own stable id for the end user. Used in logs and to limit each user to 2 simultaneous sessions.
+        ttl_seconds:
+          type: integer
+          description: Token lifetime. Clamped to 10-900. Default 300.
+        lang:
+          type: string
+          description: Lock the token to one language code (for example `hi`). Omit to allow any.
+    TokenResponse:
+      type: object
+      required: [token, expires_in, expires_at, ws_url]
+      properties:
+        token:
+          type: string
+          example: "ebma1.eyJraWQiOiJ1aS1kZXYiLC..."
+        expires_in:
+          type: integer
+          example: 300
+        expires_at:
+          type: integer
+          description: "Unix time in seconds."
+        ws_url:
+          type: string
+          example: "wss://backend.example.com/ws"
+          description: "Connect here with ?token=<token> appended."
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              enum: [unauthorized, bad_request, no_api_keys, not_found]
+            message:
+              type: string

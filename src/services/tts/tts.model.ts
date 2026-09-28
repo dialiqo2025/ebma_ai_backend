@@ -2,6 +2,8 @@ import { audioMimeTypeByFormat } from "./tts.helper";
 
 const DEFAULT_TIMEOUT_MS = 60_000;
 const DEFAULT_MAX_AUDIO_BYTES = 25 * 1024 * 1024;
+const DEFAULT_TEMPERATURE = 0.8;
+const DEFAULT_TOP_K = 50;
 
 type TtsModelInput = {
   text: string;
@@ -33,6 +35,11 @@ export class TtsModelError extends Error {
 const positiveIntegerFromEnvironment = (name: string, fallback: number) => {
   const value = Number(process.env[name]);
   return Number.isInteger(value) && value > 0 ? value : fallback;
+};
+
+const floatFromEnvironment = (name: string, fallback: number) => {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) ? value : fallback;
 };
 
 const extractBase64Audio = (payload: any): string | undefined => {
@@ -82,6 +89,21 @@ const buildModelHeaders = () => {
   return headers;
 };
 
+/** Payload for EBMA TTS `POST /tts/v1/audio/speech` (OpenAI-style speech API). */
+const buildSpeechRequestBody = (input: TtsModelInput) => ({
+  input: input.text,
+  // Non-streaming returns a complete audio/wav body, which we store on disk.
+  stream: false,
+  temperature: floatFromEnvironment("TTS_MODEL_TEMPERATURE", DEFAULT_TEMPERATURE),
+  top_k: positiveIntegerFromEnvironment("TTS_MODEL_TOP_K", DEFAULT_TOP_K),
+  language: input.language,
+  voice_mode: input.voiceMode,
+  ...(input.voiceId ? { voice_id: input.voiceId } : {}),
+  speed: input.speed,
+  pitch: input.pitch,
+  output_format: input.outputFormat,
+});
+
 export const synthesizeWithTtsModel = async (
   input: TtsModelInput,
 ): Promise<TtsModelOutput> => {
@@ -99,15 +121,7 @@ export const synthesizeWithTtsModel = async (
     response = await fetch(endpoint, {
       method: "POST",
       headers: buildModelHeaders(),
-      body: JSON.stringify({
-        text: input.text,
-        language: input.language,
-        voice_mode: input.voiceMode,
-        ...(input.voiceId ? { voice_id: input.voiceId } : {}),
-        speed: input.speed,
-        pitch: input.pitch,
-        output_format: input.outputFormat,
-      }),
+      body: JSON.stringify(buildSpeechRequestBody(input)),
       signal: AbortSignal.timeout(
         positiveIntegerFromEnvironment("TTS_MODEL_TIMEOUT_MS", DEFAULT_TIMEOUT_MS),
       ),
@@ -124,8 +138,32 @@ export const synthesizeWithTtsModel = async (
   if (!response.ok) {
     const responseText = (await response.text()).slice(0, 500);
     console.error("TTS model request failed", response.status, responseText);
+
+    let detail = "";
+    try {
+      const payload = JSON.parse(responseText);
+      detail =
+        payload?.detail ||
+        payload?.error?.message ||
+        payload?.message ||
+        "";
+    } catch {
+      detail = responseText.trim();
+    }
+
+    const hint =
+      response.status === 404
+        ? " (endpoint not found — use /tts/v1/audio/speech)"
+        : response.status === 405
+          ? " (method not allowed — this URL likely is not the POST synthesize route)"
+          : response.status === 401 || response.status === 403
+            ? " (authentication failed — check TTS_MODEL_API_KEY)"
+            : "";
+
     throw new TtsModelError(
-      "The TTS model could not generate audio",
+      detail
+        ? `The TTS model could not generate audio: ${detail}${hint}`
+        : `The TTS model could not generate audio (HTTP ${response.status})${hint}`,
       "model_request_failed",
       response.status >= 500 ? 502 : 422,
     );

@@ -242,6 +242,7 @@ export const createSttBrowserToken = async (
         status: "connecting",
         error_code: null,
         error_message: null,
+        completed_at: null,
         updated_at: new Date(),
       })
       .where(

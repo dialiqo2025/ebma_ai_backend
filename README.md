@@ -42,16 +42,25 @@ List query parameters are `page`, `page_size` (maximum 100), `status`, `language
 
 ## TTS model adapter
 
-The supplied project documentation currently specifies only the EBMA ASR/STT service; it
-does not define a TTS GPU endpoint. The management API therefore isolates the model call in
-`src/services/tts/tts.model.ts` and uses the full URL from `TTS_MODEL_ENDPOINT`.
+EBMA TTS is served on the same GPU host under a different path than ASR:
 
-The adapter sends this server-to-server JSON payload:
+```text
+POST https://<host>/tts/v1/audio/speech
+Authorization: Bearer <API key>
+Content-Type: application/json
+```
+
+Set `TTS_MODEL_ENDPOINT` to that full URL (not `/tts` or `/tts/?key=`).
+
+The adapter in `src/services/tts/tts.model.ts` sends:
 
 ```json
 {
-  "text": "...",
-  "language": "hi",
+  "input": "...",
+  "stream": false,
+  "temperature": 0.8,
+  "top_k": 50,
+  "language": "en",
   "voice_mode": "default",
   "speed": 1,
   "pitch": 1,
@@ -59,14 +68,13 @@ The adapter sends this server-to-server JSON payload:
 }
 ```
 
-It accepts either an `audio/*` response or JSON containing base64 audio in
-`audio_base64`, `audioBase64`, `audio`, or the first item of `audios`. Update this one adapter
-when the EBMA TTS model contract is supplied.
+With `stream: false` the model returns a complete `audio/wav` body, which is stored under
+`TTS_AUDIO_DIRECTORY`. `stream: true` returns raw `audio/pcm` and is not used by this API.
 
-Keep `TTS_AUTO_PROCESS=false` while the GPU is offline. Creation then returns `202` with a
-queued record. Set it to `true` to process during creation, or call the generate endpoint
-explicitly. Generated audio is private and stored under `TTS_AUDIO_DIRECTORY`; use persistent
-storage in production.
+ASR docs under `docs/ebma-asr/` cover speech-to-text only (`/health`, `/v1/tokens`, `/ws`).
+
+Keep `TTS_AUTO_PROCESS=false` while iterating; call the generate endpoint explicitly, or set
+it to `true` to process during creation.
 
 ## STT API
 
@@ -101,8 +109,9 @@ Create a session:
 ```
 
 The create and token responses include the exact WebSocket `startMessage`. After receiving
-the token, connect to `connection.wsUrl + "?token=" + connection.token`, wait for `ready`,
-send the supplied `startMessage`, and then send 16-bit signed little-endian mono PCM frames.
+the token, connect to `connection.wsUrl + "?token=" + connection.token`, send the supplied
+`startMessage` as soon as the socket opens, wait for `ready`, then send 16-bit signed
+little-endian mono PCM frames. (The GPU replies with `ready` only after it receives `start`.)
 
 When a `final` event arrives, send the event unchanged to the segments endpoint:
 

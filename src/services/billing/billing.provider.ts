@@ -10,10 +10,15 @@ export const BILLING_PRICES = {
   llm_tokens: Number(process.env.BILLING_LLM_CREDITS_PER_TOKEN ?? 1),
 } as const;
 
+const initialCredits = () => {
+  const value = Number(process.env.BILLING_INITIAL_CREDITS ?? 1000);
+  return Number.isFinite(value) && value >= 0 ? value : 1000;
+};
+
 const formatCredits = (value: number) => Number.isInteger(value) ? String(value) : value.toFixed(2);
 
 const ensureWallet = async (userUuid: string) => {
-  const [wallet] = await db.insert(BillingWallets).values({ user_uuid: userUuid }).onConflictDoNothing({ target: BillingWallets.user_uuid }).returning();
+  const [wallet] = await db.insert(BillingWallets).values({ user_uuid: userUuid, balance_credits: initialCredits().toFixed(6) }).onConflictDoNothing({ target: BillingWallets.user_uuid }).returning();
   if (wallet) return wallet;
   const [existing] = await db.select().from(BillingWallets).where(eq(BillingWallets.user_uuid, userUuid)).limit(1);
   return existing;

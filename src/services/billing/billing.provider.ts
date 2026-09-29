@@ -67,6 +67,7 @@ export const getBillingSummary = async (userUuid: string) => {
   return GenResObj(Code.OK, true, "Billing summary fetched successfully", {
     balanceCredits: Math.max(0, Number(wallet?.balance_credits ?? 0)),
     overageCredits: Math.max(0, -Number(wallet?.balance_credits ?? 0)),
+    initialCredits: initialCredits(),
     usedCredits: Number(usage?.totalCredits ?? 0),
     usageQuantity: Number(usage?.totalQuantity ?? 0),
     pricing: {

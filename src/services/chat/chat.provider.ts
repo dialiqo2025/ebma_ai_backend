@@ -5,6 +5,7 @@ import { STT_LANGUAGES } from "../stt/stt.helper";
 import { isTtsModelConfigured } from "../tts/tts.helper";
 import { synthesizeWithTtsModel, TtsModelError } from "../tts/tts.model";
 import { buildChatSystemPrompt, parseChatCompletion } from "./chat.helper";
+import { recordUsage } from "../billing/billing.provider";
 import {
   CHAT_MAX_HISTORY_MESSAGES,
   CHAT_MAX_MESSAGE_CHARACTERS,
@@ -27,7 +28,7 @@ const truncateForSpeech = (text: string) => {
   return (lastBoundary > MAX_REPLY_CHARACTERS / 2 ? slice.slice(0, lastBoundary + 1) : slice).trim();
 };
 
-export const replyToChatMessage = async (payload: ChatMessage) => {
+export const replyToChatMessage = async (userUuid: string, payload: ChatMessage) => {
   const startedAt = Date.now();
 
   try {
@@ -55,6 +56,17 @@ export const replyToChatMessage = async (payload: ChatMessage) => {
         : payload.language !== "auto"
           ? payload.language
           : "auto");
+
+    // The provider adapter currently exposes no token usage metadata. Use a
+    // conservative character-based estimate until provider usage is available.
+    void recordUsage({
+      userUuid,
+      type: "llm_tokens",
+      quantity: Math.ceil((payload.message.length + parsed.text.length) / 4),
+      idempotencyKey: `llm:${userUuid}:${Date.now()}`,
+      ...(completion.providerRequestId ? { providerReference: completion.providerRequestId } : {}),
+      metadata: { model: process.env.LLM_MODEL ?? "configured", estimated: true },
+    });
 
     return GenResObj(Code.OK, true, "Reply generated successfully", {
       reply: {

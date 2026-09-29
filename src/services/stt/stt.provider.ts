@@ -4,6 +4,7 @@ import { SttSegments, SttSessions, SttTranscriptions } from "../../schema";
 import { HttpStatusCodes as Code } from "../../utils/httpType.util";
 import { GenResObj } from "../../utils/responseFormat.util";
 import { prepareTextForTts } from "../llm/llm.provider";
+import { recordUsage } from "../billing/billing.provider";
 import {
   isSttModelConfigured,
   mapProviderTranscriptionStatus,
@@ -439,6 +440,16 @@ export const addSttFinalSegment = async (
   });
 
   if (!result.segment) throw new Error("STT segment persistence failed");
+
+  if (!result.duplicate) {
+    void recordUsage({
+      userUuid,
+      type: "stt_seconds",
+      quantity: Number(result.segment.audio_seconds),
+      idempotencyKey: `stt:${sessionUuid}:${payload.seg}`,
+      metadata: { sessionUuid, language: payload.lang },
+    });
+  }
 
   return GenResObj(
     result.duplicate ? Code.OK : Code.CREATED,

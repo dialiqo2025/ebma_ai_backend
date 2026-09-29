@@ -52,3 +52,9 @@ export const sttTranscriptionStatusEnum = pgEnum("stt_transcription_status", [
   "failed",
   "cancelled",
 ]);
+
+export const billingUsageTypeEnum = pgEnum("billing_usage_type", [
+  "tts_characters",
+  "stt_seconds",
+  "llm_tokens",
+]);

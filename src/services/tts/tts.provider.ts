@@ -15,6 +15,7 @@ import {
   serializeTtsGeneration,
 } from "./tts.helper";
 import { synthesizeWithTtsModel, TtsModelError } from "./tts.model";
+import { recordUsage } from "../billing/billing.provider";
 import type {
   CreateTtsGeneration,
   ListTtsGenerations,
@@ -328,6 +329,15 @@ export const generateTtsAudio = async (generationUuid: string, userUuid: string)
       .returning();
 
     if (!completed) throw new Error("TTS generation completion update failed");
+
+    void recordUsage({
+      userUuid,
+      type: "tts_characters",
+      quantity: claimed.input_text.length,
+      idempotencyKey: `tts:${claimed.generation_uuid}`,
+      ...(output.providerRequestId ? { providerReference: output.providerRequestId } : {}),
+      metadata: { generationUuid: claimed.generation_uuid, language: claimed.language },
+    });
 
     return GenResObj(
       Code.OK,

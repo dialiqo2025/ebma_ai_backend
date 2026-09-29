@@ -4,6 +4,7 @@ import { db } from "../../config/database/connection.database";
 import { TtsGenerations } from "../../schema";
 import { GenResObj } from "../../utils/responseFormat.util";
 import { HttpStatusCodes as Code } from "../../utils/httpType.util";
+import { prepareTextForTts } from "../llm/llm.provider";
 import {
   audioMimeTypeByFormat,
   deleteTtsAudio,
@@ -280,8 +281,17 @@ export const generateTtsAudio = async (generationUuid: string, userUuid: string)
   let savedFileName: string | null = null;
 
   try {
+    const llmText =
+      process.env.LLM_MODEL_ENDPOINT && process.env.LLM_API_KEY
+        ? (await prepareTextForTts({
+            text: claimed.input_text,
+            language: claimed.language,
+            style: "natural",
+          })).data?.data?.text
+        : claimed.input_text;
+
     const output = await synthesizeWithTtsModel({
-      text: claimed.input_text,
+      text: typeof llmText === "string" ? llmText : claimed.input_text,
       language: claimed.language,
       voiceMode: claimed.voice_mode,
       ...(claimed.voice_id ? { voiceId: claimed.voice_id } : {}),

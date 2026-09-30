@@ -358,72 +358,57 @@ export const addSttFinalSegment = async (
     return GenResObj(Code.CONFLICT, false, "STT session is not active");
   }
 
-  const result = await db.transaction(async (transaction) => {
-    await transaction.execute(
-      sql`select pg_advisory_xact_lock(hashtext(${sessionUuid}))`,
-    );
+  // This runs once per spoken phrase, so it stays at two short statements: no
+  // transaction, no full segment re-read, no LLM call. The unique index makes the
+  // insert idempotent, and the session totals are bumped relative to the row's
+  // current values so concurrent segments cannot overwrite each other. Finishing
+  // the session rebuilds the totals from the segments in order.
+  const [inserted] = await db
+    .insert(SttSegments)
+    .values({
+      session_uuid: sessionUuid,
+      segment_index: payload.seg,
+      text: payload.text,
+      language: payload.lang,
+      start_seconds: payload.t0,
+      end_seconds: payload.t1,
+      audio_seconds: payload.audio_s,
+      decode_ms: payload.decode_ms,
+      latency_ms: payload.latency_ms,
+      reason: payload.reason,
+    })
+    .onConflictDoNothing({
+      target: [SttSegments.session_uuid, SttSegments.segment_index],
+    })
+    .returning();
 
-    const [inserted] = await transaction
-      .insert(SttSegments)
-      .values({
-        session_uuid: sessionUuid,
-        segment_index: payload.seg,
-        text: payload.text,
-        language: payload.lang,
-        start_seconds: payload.t0,
-        end_seconds: payload.t1,
-        audio_seconds: payload.audio_s,
-        decode_ms: payload.decode_ms,
-        latency_ms: payload.latency_ms,
-        reason: payload.reason,
-      })
-      .onConflictDoNothing({
-        target: [SttSegments.session_uuid, SttSegments.segment_index],
-      })
-      .returning();
+  let result: {
+    duplicate: boolean;
+    segment: typeof SttSegments.$inferSelect | undefined;
+    session: typeof SttSessions.$inferSelect;
+  };
 
-    if (!inserted) {
-      const [existingSegment] = await transaction
-        .select()
-        .from(SttSegments)
-        .where(
-          and(
-            eq(SttSegments.session_uuid, sessionUuid),
-            eq(SttSegments.segment_index, payload.seg),
-          ),
-        )
-        .limit(1);
-
-      return { duplicate: true, segment: existingSegment, session };
-    }
-
-    const segments = await transaction
+  if (!inserted) {
+    const [existingSegment] = await db
       .select()
       .from(SttSegments)
-      .where(eq(SttSegments.session_uuid, sessionUuid))
-      .orderBy(asc(SttSegments.segment_index));
+      .where(
+        and(
+          eq(SttSegments.session_uuid, sessionUuid),
+          eq(SttSegments.segment_index, payload.seg),
+        ),
+      )
+      .limit(1);
 
-    const transcript = segments.map((segment) => segment.text).join(" ");
-    const audioDurationSeconds = segments.reduce(
-      (total, segment) => total + segment.audio_seconds,
-      0,
-    );
-
-    const llmPreparedText = process.env.LLM_MODEL_ENDPOINT && process.env.LLM_API_KEY
-      ? (await prepareTextForTts({
-          text: transcript,
-          language: session.language,
-          style: "natural",
-        })).data?.data?.text
-      : transcript;
-
-    const [updatedSession] = await transaction
+    result = { duplicate: true, segment: existingSegment, session };
+  } else {
+    const [updatedSession] = await db
       .update(SttSessions)
       .set({
-        status: "streaming",
-        transcript: typeof llmPreparedText === "string" ? llmPreparedText : transcript,
-        phrase_count: segments.length,
-        audio_duration_seconds: audioDurationSeconds,
+        status: sql`case when ${SttSessions.status} = 'connecting' then 'streaming' else ${SttSessions.status} end`,
+        transcript: sql`case when ${SttSessions.transcript} = '' then ${payload.text} else ${SttSessions.transcript} || ' ' || ${payload.text} end`,
+        phrase_count: sql`${SttSessions.phrase_count} + 1`,
+        audio_duration_seconds: sql`${SttSessions.audio_duration_seconds} + ${payload.audio_s}`,
         started_at: session.started_at ?? new Date(),
         updated_at: new Date(),
       })
@@ -436,8 +421,8 @@ export const addSttFinalSegment = async (
       .returning();
 
     if (!updatedSession) throw new Error("STT session aggregation failed");
-    return { duplicate: false, segment: inserted, session: updatedSession };
-  });
+    result = { duplicate: false, segment: inserted, session: updatedSession };
+  }
 
   if (!result.segment) throw new Error("STT segment persistence failed");
 
@@ -464,6 +449,34 @@ export const addSttFinalSegment = async (
   );
 };
 
+// The LLM rewrite of the stored transcript runs once, after the session ends and
+// after the finish response is sent, so it never delays live transcription.
+const polishSttSessionTranscript = async (
+  sessionUuid: string,
+  language: string,
+  transcript: string,
+) => {
+  try {
+    const polished = (
+      await prepareTextForTts({ text: transcript, language, style: "natural" })
+    ).data?.data?.text;
+
+    if (typeof polished !== "string" || polished === transcript) return;
+
+    await db
+      .update(SttSessions)
+      .set({ transcript: polished, updated_at: new Date() })
+      .where(
+        and(
+          eq(SttSessions.session_uuid, sessionUuid),
+          eq(SttSessions.transcript, transcript),
+        ),
+      );
+  } catch (error) {
+    console.error("STT transcript polish failed", error);
+  }
+};
+
 export const finishSttSession = async (
   sessionUuid: string,
   userUuid: string,
@@ -481,10 +494,15 @@ export const finishSttSession = async (
     );
   }
 
+  // Segments only append to the running totals, so settle them here from the
+  // stored segments, in segment order.
   const [updated] = await db
     .update(SttSessions)
     .set({
       status: payload.status,
+      transcript: sql`coalesce((select string_agg(${SttSegments.text}, ' ' order by ${SttSegments.segment_index}) from ${SttSegments} where ${SttSegments.session_uuid} = ${sessionUuid}), '')`,
+      phrase_count: sql`(select count(*)::int from ${SttSegments} where ${SttSegments.session_uuid} = ${sessionUuid})`,
+      audio_duration_seconds: sql`coalesce((select sum(${SttSegments.audio_seconds}) from ${SttSegments} where ${SttSegments.session_uuid} = ${sessionUuid}), 0)`,
       error_code: payload.status === "failed" ? payload.errorCode ?? null : null,
       error_message: payload.status === "failed" ? payload.errorMessage ?? null : null,
       completed_at: new Date(),
@@ -499,6 +517,10 @@ export const finishSttSession = async (
     .returning();
 
   if (!updated) throw new Error("STT session completion failed");
+
+  if (updated.transcript && process.env.LLM_MODEL_ENDPOINT && process.env.LLM_API_KEY) {
+    void polishSttSessionTranscript(sessionUuid, updated.language, updated.transcript);
+  }
 
   return GenResObj(
     Code.OK,

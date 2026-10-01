@@ -5,6 +5,7 @@ import { STT_LANGUAGES } from "../stt/stt.helper";
 import { isTtsModelConfigured } from "../tts/tts.helper";
 import { synthesizeWithTtsModel, TtsModelError } from "../tts/tts.model";
 import { buildChatSystemPrompt, parseChatCompletion } from "./chat.helper";
+import { loadPrivateUserConfig } from "../llm/llm.user.provider";
 import { recordUsage } from "../billing/billing.provider";
 import {
   CHAT_MAX_HISTORY_MESSAGES,
@@ -40,7 +41,7 @@ export const replyToChatMessage = async (userUuid: string, payload: ChatMessage)
       ],
       temperature: 0.6,
       json: true,
-    });
+    }, await loadPrivateUserConfig(userUuid) ?? undefined);
 
     const parsed = parseChatCompletion(completion.rawText);
     if (!parsed.text) {

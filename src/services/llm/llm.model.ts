@@ -60,13 +60,13 @@ export const buildLlmPrompt = ({
   `.trim();
 };
 
-const buildModelHeaders = () => {
+const buildModelHeaders = (configuredKey?: string) => {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     Accept: "application/json",
   };
 
-  const apiKey = process.env.LLM_API_KEY?.trim();
+  const apiKey = configuredKey?.trim() || process.env.LLM_API_KEY?.trim();
   const apiKeyHeader = process.env.LLM_API_KEY_HEADER?.trim() || "Authorization";
   const rawPrefix = process.env.LLM_API_KEY_PREFIX;
   const apiKeyPrefix = rawPrefix === undefined ? "Bearer" : rawPrefix.trim();
@@ -119,13 +119,14 @@ export type LlmCompletionInput = {
   /** Ask the model for a JSON object (Gemini enforces it; others follow the prompt). */
   json?: boolean;
 };
+export type UserLlmSettings = { provider: string; model_name: string; endpoint: string | null; api_key: string; temperature: string | number; max_tokens: number; top_p: string | number; timeout_ms: number };
 
 export type LlmCompletionOutput = {
   rawText: string;
   providerRequestId?: string;
 };
 
-const buildGeminiBody = (input: LlmCompletionInput) => {
+const buildGeminiBody = (input: LlmCompletionInput, settings?: UserLlmSettings) => {
   const thinkingBudget = Number(process.env.LLM_THINKING_BUDGET);
 
   return {
@@ -135,7 +136,8 @@ const buildGeminiBody = (input: LlmCompletionInput) => {
       parts: [{ text: turn.text }],
     })),
     generationConfig: {
-      temperature: input.temperature ?? 0.2,
+      temperature: input.temperature ?? Number(settings?.temperature ?? 0.2),
+      maxOutputTokens: settings?.max_tokens,
       ...(input.json ? { responseMimeType: "application/json" } : {}),
       ...(Number.isInteger(thinkingBudget) && thinkingBudget >= 0
         ? { thinkingConfig: { thinkingBudget } }
@@ -144,43 +146,46 @@ const buildGeminiBody = (input: LlmCompletionInput) => {
   };
 };
 
-const buildChatCompletionsBody = (input: LlmCompletionInput, modelName: string) => ({
+const buildChatCompletionsBody = (input: LlmCompletionInput, modelName: string, settings?: UserLlmSettings) => ({
   model: modelName,
   messages: [
     { role: "system", content: input.system },
     ...input.turns.map((turn) => ({ role: turn.role, content: turn.text })),
   ],
-  temperature: input.temperature ?? 0.2,
+  temperature: input.temperature ?? Number(settings?.temperature ?? 0.2),
+  max_tokens: settings?.max_tokens,
+  top_p: settings?.top_p === undefined ? undefined : Number(settings.top_p),
+});
+
+const buildClaudeBody = (input: LlmCompletionInput, settings?: UserLlmSettings) => ({
+  model: settings?.model_name,
+  system: input.system,
+  messages: input.turns.map((turn) => ({ role: turn.role, content: turn.text })),
+  max_tokens: settings?.max_tokens ?? 1024,
+  temperature: input.temperature ?? Number(settings?.temperature ?? 0.2),
 });
 
 export const requestLlmCompletion = async (
   input: LlmCompletionInput,
+  settings?: UserLlmSettings,
 ): Promise<LlmCompletionOutput> => {
-  const endpoint = process.env.LLM_MODEL_ENDPOINT?.trim();
-  if (!endpoint) {
-    throw new LlmModelError(
-      "LLM model endpoint is not configured",
-      "model_not_configured",
-      503,
-    );
-  }
-
-  const modelName = process.env.LLM_MODEL?.trim() || "gpt-4o-mini";
-  const isGemini = endpoint.includes("generativelanguage.googleapis.com") || modelName.startsWith("gemini-");
-  const apiKey = process.env.LLM_API_KEY?.trim();
-  const finalEndpoint = isGemini && apiKey && !endpoint.includes("key=")
-    ? `${endpoint}${endpoint.includes("?") ? "&" : "?"}key=${encodeURIComponent(apiKey)}`
-    : endpoint;
+  const endpoint = settings?.endpoint?.trim() || process.env.LLM_MODEL_ENDPOINT?.trim() || "";
+  const modelName = settings?.model_name?.trim() || process.env.LLM_MODEL?.trim() || "gpt-4o-mini";
+  const provider = settings?.provider?.toLowerCase();
+  const isGemini = provider === "gemini" || endpoint.includes("generativelanguage.googleapis.com") || modelName.startsWith("gemini-");
+  const isClaude = provider === "claude" || endpoint.includes("anthropic.com") || modelName.startsWith("claude-");
+  const apiKey = settings?.api_key?.trim() || process.env.LLM_API_KEY?.trim();
+  const resolvedEndpoint = settings?.endpoint?.trim() || (isGemini ? `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent` : isClaude ? "https://api.anthropic.com/v1/messages" : endpoint);
+  if (!resolvedEndpoint) throw new LlmModelError("LLM model endpoint is not configured", "model_not_configured", 503);
+  const finalEndpoint = isGemini && apiKey && !resolvedEndpoint.includes("key=") ? `${resolvedEndpoint}${resolvedEndpoint.includes("?") ? "&" : "?"}key=${encodeURIComponent(apiKey)}` : resolvedEndpoint;
 
   let response: Response;
   try {
     response = await fetch(finalEndpoint, {
       method: "POST",
-      headers: buildModelHeaders(),
-      body: JSON.stringify(
-        isGemini ? buildGeminiBody(input) : buildChatCompletionsBody(input, modelName),
-      ),
-      signal: AbortSignal.timeout(Number(process.env.LLM_TIMEOUT_MS ?? 30_000)),
+      headers: isClaude ? { "Content-Type": "application/json", Accept: "application/json", "x-api-key": apiKey || "", "anthropic-version": "2023-06-01" } : buildModelHeaders(apiKey),
+      body: JSON.stringify(isGemini ? buildGeminiBody(input, settings) : isClaude ? buildClaudeBody(input, settings) : buildChatCompletionsBody(input, modelName, settings)),
+      signal: AbortSignal.timeout(Number(settings?.timeout_ms ?? process.env.LLM_TIMEOUT_MS ?? 30_000)),
     });
   } catch (error) {
     const timedOut = error instanceof Error && error.name === "TimeoutError";
@@ -240,12 +245,12 @@ export const requestLlmCompletion = async (
   };
 };
 
-export const transformWithLlm = async (input: LlmRequestInput): Promise<LlmModelOutput> => {
+export const transformWithLlm = async (input: LlmRequestInput, settings?: UserLlmSettings): Promise<LlmModelOutput> => {
   const completion = await requestLlmCompletion({
     system: "You are a transcript cleanup assistant for speech synthesis.",
     turns: [{ role: "user", text: buildLlmPrompt(input) }],
-    temperature: 0.2,
-  });
+    temperature: Number(settings?.temperature ?? 0.2),
+  }, settings);
 
   const finalText = normalizeLlmText(completion.rawText);
 

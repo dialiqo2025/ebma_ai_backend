@@ -1,0 +1,1 @@
+ALTER TABLE "billing_plans" ADD COLUMN "plan_kind" varchar(20) DEFAULT 'service' NOT NULL;

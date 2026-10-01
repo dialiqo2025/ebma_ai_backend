@@ -1,0 +1,1 @@
+ALTER TABLE "billing_transactions" ADD COLUMN "updated_at" timestamp DEFAULT now() NOT NULL;

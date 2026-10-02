@@ -73,7 +73,7 @@ export const getUserCapabilities = async (userUuid: string) => {
   // Existing accounts without a subscription retain the current product access.
   const features = subscription?.plan?.features ?? { stt: true, tts: true, llm: true };
   return GenResObj(Code.OK, true, "Capabilities fetched successfully", {
-    plan: subscription?.plan?.name ?? "Legacy access",
+    plan: subscription?.plan?.name ?? "No plan",
     subscribed: Boolean(subscription?.plan),
     capabilities: { stt: Boolean(features.stt), tts: Boolean(features.tts), llm: true, llmMode: "user" },
   });

@@ -113,6 +113,13 @@
       "when": 1790850000000,
       "tag": "0015_user_llm_configs",
       "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1790900000000,
+      "tag": "0016_oauth_passwordless",
+      "breakpoints": true
     }
   ]
 }

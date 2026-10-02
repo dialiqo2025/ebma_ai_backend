@@ -104,4 +104,43 @@ export const AuthController = {
       next(error);
     }
   },
+
+  googleStart: async (_req: Request, res: Response, next: NextFunction) => {
+    try {
+      const url = AuthProvider.getGoogleAuthUrl();
+      res.redirect(url);
+    } catch (error) {
+      next(error);
+    }
+  },
+
+  googleCallback: async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const code = typeof req.query.code === "string" ? req.query.code : undefined;
+      const oauthError = typeof req.query.error === "string" ? req.query.error : undefined;
+
+      if (oauthError) {
+        const frontend =
+          process.env.CLIENT_OAUTH_REDIRECT?.trim() ||
+          `${(process.env.FRONTEND_URL || "http://localhost:3000").replace(/\/$/, "")}/oauth-success`;
+        const fail = new URL(frontend);
+        fail.searchParams.set("error", oauthError);
+        return res.redirect(fail.toString());
+      }
+
+      const result = await AuthProvider.handleGoogleCallback(code);
+      if (!result.ok) {
+        const frontend =
+          process.env.CLIENT_OAUTH_REDIRECT?.trim() ||
+          `${(process.env.FRONTEND_URL || "http://localhost:3000").replace(/\/$/, "")}/oauth-success`;
+        const fail = new URL(frontend);
+        fail.searchParams.set("error", result.message);
+        return res.redirect(fail.toString());
+      }
+
+      return res.redirect(result.redirectUrl);
+    } catch (error) {
+      next(error);
+    }
+  },
 };

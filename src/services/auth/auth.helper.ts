@@ -61,6 +61,7 @@ export const getUserByEmail = async (email: string) => {
 export const sanitizeUser = (user: UserRecord) => {
   const {
     password: _password,
+    google_id: _googleId,
     otp_code_hash: _otpHash,
     otp_expires_at: _otpExpiry,
     otp_attempts: _otpAttempts,
@@ -77,8 +78,19 @@ export const hashPassword = (password: string) => {
   return bcrypt.hash(password, 10);
 };
 
-export const comparePassword = (plainPassword: string, hashedPassword: string) =>
-  bcrypt.compare(plainPassword, hashedPassword);
+export const comparePassword = (plainPassword: string, hashedPassword: string | null) => {
+  if (!hashedPassword) return Promise.resolve(false);
+  return bcrypt.compare(plainPassword, hashedPassword);
+};
+
+export const getUserByGoogleId = async (googleId: string) => {
+  const [user] = await db
+    .select()
+    .from(Users)
+    .where(eq(Users.google_id, googleId))
+    .limit(1);
+  return user;
+};
 
 export const createAccessToken = (id: string, role: string) => {
   const expiresInSeconds = 30 * 24 * 60 * 60;

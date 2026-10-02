@@ -120,6 +120,13 @@
       "when": 1790900000000,
       "tag": "0016_oauth_passwordless",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1790950000000,
+      "tag": "0016_api_keys",
+      "breakpoints": true
     }
   ]
 }

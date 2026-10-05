@@ -8,6 +8,8 @@ export const Users = pgTable("users", {
   email: varchar("email", { length: 255 }).notNull().unique(),
   password: varchar("password", { length: 255 }),
   google_id: varchar("google_id", { length: 255 }).unique(),
+  microsoft_id: varchar("microsoft_id", { length: 255 }).unique(),
+  apple_id: varchar("apple_id", { length: 255 }).unique(),
   auth_provider: varchar("auth_provider", { length: 32 }).default("email").notNull(),
   role: userRoleEnum("role").default("user").notNull(),
   user_enabled: boolean("user_enabled").default(true).notNull(),

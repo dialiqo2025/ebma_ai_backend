@@ -127,6 +127,13 @@
       "when": 1790950000000,
       "tag": "0016_api_keys",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1791000000000,
+      "tag": "0017_microsoft_apple_oauth",
+      "breakpoints": true
     }
   ]
 }

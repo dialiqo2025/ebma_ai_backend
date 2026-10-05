@@ -14,6 +14,13 @@ router.route("/sign-in/verify-otp").post(AuthController.verifySignInOtp);
 router.get("/google", AuthController.googleStart);
 router.get("/google/callback", AuthController.googleCallback);
 
+router.get("/microsoft", AuthController.microsoftStart);
+router.get("/microsoft/callback", AuthController.microsoftCallback);
+
+router.get("/apple", AuthController.appleStart);
+router.post("/apple/callback", AuthController.appleCallback);
+router.get("/apple/callback", AuthController.appleCallback);
+
 router
   .route("/update-profile")
   .post(authCheck(["superAdmin", "admin", "tenant", "user", "superAnalyst", "compliance"]), AuthController.updateProfile);

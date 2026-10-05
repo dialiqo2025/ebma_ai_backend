@@ -90,10 +90,9 @@ const buildModelHeaders = () => {
 };
 
 /** Payload for EBMA TTS `POST /tts/v1/audio/speech` (OpenAI-style speech API). */
-const buildSpeechRequestBody = (input: TtsModelInput) => ({
+const buildSpeechRequestBody = (input: TtsModelInput, stream: boolean) => ({
   input: input.text,
-  // Non-streaming returns a complete audio/wav body, which we store on disk.
-  stream: false,
+  stream,
   temperature: floatFromEnvironment("TTS_MODEL_TEMPERATURE", DEFAULT_TEMPERATURE),
   top_k: positiveIntegerFromEnvironment("TTS_MODEL_TOP_K", DEFAULT_TOP_K),
   language: input.language,
@@ -103,6 +102,119 @@ const buildSpeechRequestBody = (input: TtsModelInput) => ({
   pitch: input.pitch,
   output_format: input.outputFormat,
 });
+
+const parseUpstreamError = async (response: Response) => {
+  const responseText = (await response.text()).slice(0, 500);
+  console.error("TTS model request failed", response.status, responseText);
+
+  let detail = "";
+  try {
+    const payload = JSON.parse(responseText);
+    detail =
+      payload?.detail ||
+      payload?.error?.message ||
+      payload?.message ||
+      "";
+  } catch {
+    detail = responseText.trim();
+  }
+
+  const hint =
+    response.status === 404
+      ? " (endpoint not found — use /tts/v1/audio/speech)"
+      : response.status === 405
+        ? " (method not allowed — this URL likely is not the POST synthesize route)"
+        : response.status === 401 || response.status === 403
+          ? " (authentication failed — check TTS_MODEL_API_KEY)"
+          : "";
+
+  throw new TtsModelError(
+    detail
+      ? `The TTS model could not generate audio: ${detail}${hint}`
+      : `The TTS model could not generate audio (HTTP ${response.status})${hint}`,
+    "model_request_failed",
+    response.status >= 500 ? 502 : 422,
+  );
+};
+
+const resolveStreamSampleRate = (response: Response) => {
+  const header =
+    response.headers.get("x-audio-sample-rate") ||
+    response.headers.get("x-sample-rate") ||
+    response.headers.get("sample-rate");
+  const fromHeader = header ? Number(header) : NaN;
+  if (Number.isInteger(fromHeader) && fromHeader > 0) return fromHeader;
+
+  const env = Number(process.env.TTS_STREAM_SAMPLE_RATE);
+  return Number.isInteger(env) && env > 0 ? env : 24_000;
+};
+
+export type TtsModelStream = {
+  body: ReadableStream<Uint8Array>;
+  contentType: string;
+  sampleRate: number;
+  channels: number;
+  encoding: "pcm_s16le";
+  providerRequestId?: string;
+};
+
+/** Open a streaming synthesis request (`stream: true` → typically raw PCM). */
+export const openTtsModelStream = async (
+  input: TtsModelInput,
+): Promise<TtsModelStream> => {
+  const endpoint = process.env.TTS_MODEL_ENDPOINT?.trim();
+  if (!endpoint) {
+    throw new TtsModelError(
+      "TTS model endpoint is not configured",
+      "model_not_configured",
+      503,
+    );
+  }
+
+  let response: Response;
+  try {
+    response = await fetch(endpoint, {
+      method: "POST",
+      headers: buildModelHeaders(),
+      body: JSON.stringify(buildSpeechRequestBody(input, true)),
+      signal: AbortSignal.timeout(
+        positiveIntegerFromEnvironment("TTS_MODEL_TIMEOUT_MS", DEFAULT_TIMEOUT_MS),
+      ),
+    });
+  } catch (error) {
+    const timedOut = error instanceof Error && error.name === "TimeoutError";
+    throw new TtsModelError(
+      timedOut ? "The TTS model request timed out" : "The TTS model is unavailable",
+      timedOut ? "model_timeout" : "model_unavailable",
+      timedOut ? 504 : 503,
+    );
+  }
+
+  if (!response.ok) await parseUpstreamError(response);
+  if (!response.body) {
+    throw new TtsModelError(
+      "The TTS model returned an empty stream",
+      "invalid_model_response",
+      502,
+    );
+  }
+
+  const contentType =
+    response.headers.get("content-type")?.split(";")[0]?.trim() || "audio/pcm";
+  const providerRequestId =
+    response.headers.get("x-request-id") ?? response.headers.get("request-id") ?? undefined;
+  const channelsEnv = Number(process.env.TTS_STREAM_CHANNELS);
+  const channels = Number.isInteger(channelsEnv) && channelsEnv > 0 ? channelsEnv : 1;
+
+  return {
+    body: response.body,
+    contentType,
+    sampleRate: resolveStreamSampleRate(response),
+    channels,
+    encoding: "pcm_s16le",
+    ...(providerRequestId ? { providerRequestId } : {}),
+  };
+};
 
 export const synthesizeWithTtsModel = async (
   input: TtsModelInput,
@@ -121,7 +233,7 @@ export const synthesizeWithTtsModel = async (
     response = await fetch(endpoint, {
       method: "POST",
       headers: buildModelHeaders(),
-      body: JSON.stringify(buildSpeechRequestBody(input)),
+      body: JSON.stringify(buildSpeechRequestBody(input, false)),
       signal: AbortSignal.timeout(
         positiveIntegerFromEnvironment("TTS_MODEL_TIMEOUT_MS", DEFAULT_TIMEOUT_MS),
       ),
@@ -135,39 +247,7 @@ export const synthesizeWithTtsModel = async (
     );
   }
 
-  if (!response.ok) {
-    const responseText = (await response.text()).slice(0, 500);
-    console.error("TTS model request failed", response.status, responseText);
-
-    let detail = "";
-    try {
-      const payload = JSON.parse(responseText);
-      detail =
-        payload?.detail ||
-        payload?.error?.message ||
-        payload?.message ||
-        "";
-    } catch {
-      detail = responseText.trim();
-    }
-
-    const hint =
-      response.status === 404
-        ? " (endpoint not found — use /tts/v1/audio/speech)"
-        : response.status === 405
-          ? " (method not allowed — this URL likely is not the POST synthesize route)"
-          : response.status === 401 || response.status === 403
-            ? " (authentication failed — check TTS_MODEL_API_KEY)"
-            : "";
-
-    throw new TtsModelError(
-      detail
-        ? `The TTS model could not generate audio: ${detail}${hint}`
-        : `The TTS model could not generate audio (HTTP ${response.status})${hint}`,
-      "model_request_failed",
-      response.status >= 500 ? 502 : 422,
-    );
-  }
+  if (!response.ok) await parseUpstreamError(response);
 
   const contentType = response.headers.get("content-type")?.split(";")[0]?.trim();
   const providerRequestId =

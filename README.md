@@ -18,7 +18,8 @@ Authorization: Bearer <access-token>
 | `GET` | `/api/v1/tts/generations/:generation_uuid` | Get one request |
 | `PATCH` | `/api/v1/tts/generations/:generation_uuid` | Edit a queued or failed request |
 | `DELETE` | `/api/v1/tts/generations/:generation_uuid` | Delete a request and its audio |
-| `POST` | `/api/v1/tts/generations/:generation_uuid/generate` | Generate or retry audio |
+| `POST` | `/api/v1/tts/generations/:generation_uuid/generate` | Generate or retry audio (buffered) |
+| `POST` | `/api/v1/tts/generations/:generation_uuid/stream` | Stream PCM while synthesizing (play as it arrives) |
 | `GET` | `/api/v1/tts/generations/:generation_uuid/audio` | Stream generated audio securely |
 
 Create payload:
@@ -69,7 +70,12 @@ The adapter in `src/services/tts/tts.model.ts` sends:
 ```
 
 With `stream: false` the model returns a complete `audio/wav` body, which is stored under
-`TTS_AUDIO_DIRECTORY`. `stream: true` returns raw `audio/pcm` and is not used by this API.
+`TTS_AUDIO_DIRECTORY`.
+
+For live playback, call `POST /tts/generations/:uuid/stream`. The management API sets
+`stream: true` on the GPU, pipes raw `audio/pcm` (s16le) to the client with headers
+`X-Audio-Sample-Rate` / `X-Audio-Channels`, and still saves a WAV for history after the
+stream ends. Configure `TTS_STREAM_SAMPLE_RATE` (default 24000) if pitch sounds wrong.
 
 ASR docs under `docs/ebma-asr/` cover speech-to-text only (`/health`, `/v1/tokens`, `/ws`).
 

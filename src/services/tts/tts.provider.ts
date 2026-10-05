@@ -13,8 +13,14 @@ import {
   isTtsModelConfigured,
   saveTtsAudio,
   serializeTtsGeneration,
+  wrapPcmS16leAsWav,
 } from "./tts.helper";
-import { synthesizeWithTtsModel, TtsModelError } from "./tts.model";
+import {
+  openTtsModelStream,
+  synthesizeWithTtsModel,
+  TtsModelError,
+  type TtsModelStream,
+} from "./tts.model";
 import { recordUsage } from "../billing/billing.provider";
 import type {
   CreateTtsGeneration,
@@ -414,6 +420,183 @@ export const getTtsAudio = async (generationUuid: string, userUuid: string) => {
   };
 };
 
+export type PreparedTtsStream =
+  | { response: ReturnType<typeof GenResObj> }
+  | {
+      stream: TtsModelStream;
+      generationUuid: string;
+      userUuid: string;
+      inputText: string;
+      complete: (rawAudio: Buffer) => Promise<void>;
+      fail: (error: unknown) => Promise<ReturnType<typeof GenResObj>>;
+    };
+
+/**
+ * Claim a queued/failed generation and open a GPU streaming synthesis response.
+ * Caller pipes `stream.body` to the HTTP client, then calls `complete`/`fail`.
+ */
+export const prepareTtsStream = async (
+  generationUuid: string,
+  userUuid: string,
+): Promise<PreparedTtsStream> => {
+  const generation = await findOwnedGeneration(generationUuid, userUuid);
+  if (!generation) {
+    return { response: GenResObj(Code.NOT_FOUND, false, "TTS generation not found") };
+  }
+
+  if (generation.status === "processing") {
+    return {
+      response: GenResObj(Code.CONFLICT, false, "TTS generation is already processing"),
+    };
+  }
+
+  if (generation.status === "completed") {
+    return {
+      response: GenResObj(
+        Code.CONFLICT,
+        false,
+        "TTS generation is already completed — use the audio download endpoint",
+        serializeTtsGeneration(generation),
+      ),
+    };
+  }
+
+  const [claimed] = await db
+    .update(TtsGenerations)
+    .set({
+      status: "processing",
+      started_at: new Date(),
+      completed_at: null,
+      error_code: null,
+      error_message: null,
+      updated_at: new Date(),
+    })
+    .where(
+      and(
+        eq(TtsGenerations.generation_uuid, generationUuid),
+        eq(TtsGenerations.user_uuid, userUuid),
+        inArray(TtsGenerations.status, ["queued", "failed"]),
+      ),
+    )
+    .returning();
+
+  if (!claimed) {
+    return {
+      response: GenResObj(
+        Code.CONFLICT,
+        false,
+        "TTS generation could not be claimed for streaming",
+      ),
+    };
+  }
+
+  const markFailed = async (error: unknown) => {
+    const modelError =
+      error instanceof TtsModelError
+        ? error
+        : new TtsModelError("TTS streaming failed", "generation_failed", 500);
+
+    const [failed] = await db
+      .update(TtsGenerations)
+      .set({
+        status: "failed",
+        error_code: modelError.code,
+        error_message: modelError.message,
+        completed_at: new Date(),
+        updated_at: new Date(),
+      })
+      .where(
+        and(
+          eq(TtsGenerations.generation_uuid, generationUuid),
+          eq(TtsGenerations.user_uuid, userUuid),
+        ),
+      )
+      .returning();
+
+    if (!(error instanceof TtsModelError)) {
+      console.error("Unexpected TTS stream error:", error);
+    }
+
+    return GenResObj(
+      modelError.httpStatus,
+      false,
+      modelError.message,
+      failed ? serializeTtsGeneration(failed) : undefined,
+    );
+  };
+
+  try {
+    // Skip LLM polish on the stream path so first audio byte arrives ASAP.
+    const stream = await openTtsModelStream({
+      text: claimed.input_text,
+      language: claimed.language,
+      voiceMode: claimed.voice_mode,
+      ...(claimed.voice_id ? { voiceId: claimed.voice_id } : {}),
+      speed: claimed.speed,
+      pitch: claimed.pitch,
+      outputFormat: claimed.audio_format,
+    });
+
+    return {
+      stream,
+      generationUuid,
+      userUuid,
+      inputText: claimed.input_text,
+      complete: async (rawAudio: Buffer) => {
+        const isPcm =
+          stream.contentType.includes("pcm") ||
+          stream.contentType.includes("L16") ||
+          stream.contentType === "application/octet-stream";
+
+        const audioToStore = isPcm
+          ? wrapPcmS16leAsWav(rawAudio, stream.sampleRate, stream.channels)
+          : rawAudio;
+
+        const savedFileName = await saveTtsAudio(
+          claimed.generation_uuid,
+          "wav",
+          audioToStore,
+        );
+
+        await db
+          .update(TtsGenerations)
+          .set({
+            status: "completed",
+            audio_file_name: savedFileName,
+            audio_mime_type: "audio/wav",
+            audio_format: "wav",
+            audio_size_bytes: audioToStore.length,
+            provider_request_id: stream.providerRequestId ?? null,
+            error_code: null,
+            error_message: null,
+            completed_at: new Date(),
+            updated_at: new Date(),
+          })
+          .where(
+            and(
+              eq(TtsGenerations.generation_uuid, generationUuid),
+              eq(TtsGenerations.user_uuid, userUuid),
+            ),
+          );
+
+        void recordUsage({
+          userUuid,
+          type: "tts_characters",
+          quantity: claimed.input_text.length,
+          idempotencyKey: `tts-stream:${generationUuid}`,
+          ...(stream.providerRequestId
+            ? { providerReference: stream.providerRequestId }
+            : {}),
+          metadata: { generationUuid, stream: true },
+        });
+      },
+      fail: markFailed,
+    };
+  } catch (error) {
+    return { response: await markFailed(error) };
+  }
+};
+
 export const getTtsOptions = () =>
   GenResObj(Code.OK, true, "TTS options fetched successfully", {
     maxTextCharacters: 1500,
@@ -424,4 +607,12 @@ export const getTtsOptions = () =>
     pitch: { min: 0.5, max: 1.5, step: 0.1, default: 1 },
     autoProcess: isTtsAutoProcessEnabled(),
     modelConfigured: isTtsModelConfigured(),
+    streaming: {
+      enabled: isTtsModelConfigured(),
+      endpoint: "POST /tts/generations/:generation_uuid/stream",
+      encoding: "pcm_s16le",
+      contentType: "audio/pcm",
+      sampleRate: Number(process.env.TTS_STREAM_SAMPLE_RATE) || 24_000,
+      channels: Number(process.env.TTS_STREAM_CHANNELS) || 1,
+    },
   });

@@ -11,6 +11,28 @@ import {
   updateProfileValidator,
 } from "./auth.validate";
 
+const redirectOAuthResult = (
+  res: Response,
+  result: { ok: true; redirectUrl: string } | { ok: false; message: string },
+) => {
+  if (!result.ok) {
+    return res.redirect(AuthProvider.oauthFailRedirect(result.message));
+  }
+  return res.redirect(result.redirectUrl);
+};
+
+const redirectOAuthStart = (res: Response, getUrl: () => string) => {
+  try {
+    return res.redirect(getUrl());
+  } catch (error) {
+    const message =
+      error instanceof Error
+        ? error.message
+        : "OAuth is not configured. Check server environment variables.";
+    return res.redirect(AuthProvider.oauthFailRedirect(message));
+  }
+};
+
 export const AuthController = {
   signUp: async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -105,40 +127,79 @@ export const AuthController = {
     }
   },
 
-  googleStart: async (_req: Request, res: Response, next: NextFunction) => {
-    try {
-      const url = AuthProvider.getGoogleAuthUrl();
-      res.redirect(url);
-    } catch (error) {
-      next(error);
-    }
+  googleStart: async (_req: Request, res: Response) => {
+    return redirectOAuthStart(res, () => AuthProvider.getGoogleAuthUrl());
   },
 
   googleCallback: async (req: Request, res: Response, next: NextFunction) => {
     try {
       const code = typeof req.query.code === "string" ? req.query.code : undefined;
       const oauthError = typeof req.query.error === "string" ? req.query.error : undefined;
-
       if (oauthError) {
-        const frontend =
-          process.env.CLIENT_OAUTH_REDIRECT?.trim() ||
-          `${(process.env.FRONTEND_URL || "http://localhost:3000").replace(/\/$/, "")}/oauth-success`;
-        const fail = new URL(frontend);
-        fail.searchParams.set("error", oauthError);
-        return res.redirect(fail.toString());
+        return res.redirect(AuthProvider.oauthFailRedirect(oauthError));
       }
-
       const result = await AuthProvider.handleGoogleCallback(code);
-      if (!result.ok) {
-        const frontend =
-          process.env.CLIENT_OAUTH_REDIRECT?.trim() ||
-          `${(process.env.FRONTEND_URL || "http://localhost:3000").replace(/\/$/, "")}/oauth-success`;
-        const fail = new URL(frontend);
-        fail.searchParams.set("error", result.message);
-        return res.redirect(fail.toString());
+      return redirectOAuthResult(res, result);
+    } catch (error) {
+      next(error);
+    }
+  },
+
+  microsoftStart: async (_req: Request, res: Response) => {
+    return redirectOAuthStart(res, () => AuthProvider.getMicrosoftAuthUrl());
+  },
+
+  microsoftCallback: async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const code = typeof req.query.code === "string" ? req.query.code : undefined;
+      const oauthError = typeof req.query.error === "string" ? req.query.error : undefined;
+      if (oauthError) {
+        return res.redirect(AuthProvider.oauthFailRedirect(oauthError));
+      }
+      const result = await AuthProvider.handleMicrosoftCallback(code);
+      return redirectOAuthResult(res, result);
+    } catch (error) {
+      next(error);
+    }
+  },
+
+  appleStart: async (_req: Request, res: Response) => {
+    return redirectOAuthStart(res, () => AuthProvider.getAppleAuthUrl());
+  },
+
+  appleCallback: async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const body = req.body as Record<string, unknown>;
+      const oauthError =
+        typeof body.error === "string"
+          ? body.error
+          : typeof req.query.error === "string"
+            ? req.query.error
+            : undefined;
+      if (oauthError) {
+        return res.redirect(AuthProvider.oauthFailRedirect(oauthError));
       }
 
-      return res.redirect(result.redirectUrl);
+      const code =
+        typeof body.code === "string"
+          ? body.code
+          : typeof req.query.code === "string"
+            ? req.query.code
+            : undefined;
+      const idToken =
+        typeof body.id_token === "string"
+          ? body.id_token
+          : typeof req.query.id_token === "string"
+            ? req.query.id_token
+            : undefined;
+      const userJson = typeof body.user === "string" ? body.user : undefined;
+
+      const result = await AuthProvider.handleAppleCallback({
+        ...(code ? { code } : {}),
+        ...(idToken ? { idToken } : {}),
+        ...(userJson ? { userJson } : {}),
+      });
+      return redirectOAuthResult(res, result);
     } catch (error) {
       next(error);
     }

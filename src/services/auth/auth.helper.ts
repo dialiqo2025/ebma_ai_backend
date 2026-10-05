@@ -62,6 +62,8 @@ export const sanitizeUser = (user: UserRecord) => {
   const {
     password: _password,
     google_id: _googleId,
+    microsoft_id: _microsoftId,
+    apple_id: _appleId,
     otp_code_hash: _otpHash,
     otp_expires_at: _otpExpiry,
     otp_attempts: _otpAttempts,
@@ -88,6 +90,24 @@ export const getUserByGoogleId = async (googleId: string) => {
     .select()
     .from(Users)
     .where(eq(Users.google_id, googleId))
+    .limit(1);
+  return user;
+};
+
+export const getUserByMicrosoftId = async (microsoftId: string) => {
+  const [user] = await db
+    .select()
+    .from(Users)
+    .where(eq(Users.microsoft_id, microsoftId))
+    .limit(1);
+  return user;
+};
+
+export const getUserByAppleId = async (appleId: string) => {
+  const [user] = await db
+    .select()
+    .from(Users)
+    .where(eq(Users.apple_id, appleId))
     .limit(1);
   return user;
 };

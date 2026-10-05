@@ -12,7 +12,6 @@ import {
   createAccessToken,
   getResetTokenPayload,
   getUserByEmail,
-  getUserByGoogleId,
   hashPassword,
   issueOtpChallenge,
   normalizeEmail,
@@ -274,135 +273,12 @@ export const resetPassword = async (payload: resetPasswordType, authHeader?: str
   return GenResObj(Code.OK, true, "Password reset successfully");
 };
 
-type GoogleProfile = {
-  sub: string;
-  email: string;
-  email_verified?: boolean;
-  name?: string;
-  given_name?: string;
-  family_name?: string;
-};
-
-const googleConfig = () => {
-  const clientId = process.env.GOOGLE_CLIENT_ID?.trim();
-  const clientSecret = process.env.GOOGLE_CLIENT_SECRET?.trim();
-  const callbackUrl =
-    process.env.GOOGLE_CALLBACK_URL?.trim() ||
-    `http://localhost:${process.env.PORT || 5001}/api/v1/auth/google/callback`;
-  const clientRedirect =
-    process.env.CLIENT_OAUTH_REDIRECT?.trim() ||
-    `${(process.env.FRONTEND_URL || "http://localhost:3000").replace(/\/$/, "")}/oauth-success`;
-
-  if (!clientId || !clientSecret) {
-    throw new Error("GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET must be configured");
-  }
-
-  return { clientId, clientSecret, callbackUrl, clientRedirect };
-};
-
-export const getGoogleAuthUrl = () => {
-  const { clientId, callbackUrl } = googleConfig();
-  const params = new URLSearchParams({
-    client_id: clientId,
-    redirect_uri: callbackUrl,
-    response_type: "code",
-    scope: "openid email profile",
-    access_type: "online",
-    prompt: "select_account",
-  });
-  return `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`;
-};
-
-export const handleGoogleCallback = async (code?: string) => {
-  if (!code) {
-    return { ok: false as const, message: "Missing Google authorization code" };
-  }
-
-  const { clientId, clientSecret, callbackUrl, clientRedirect } = googleConfig();
-
-  const tokenResponse = await fetch("https://oauth2.googleapis.com/token", {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      code,
-      client_id: clientId,
-      client_secret: clientSecret,
-      redirect_uri: callbackUrl,
-      grant_type: "authorization_code",
-    }),
-  });
-
-  if (!tokenResponse.ok) {
-    const detail = await tokenResponse.text();
-    console.error("Google token exchange failed:", detail);
-    return { ok: false as const, message: "Google authentication failed" };
-  }
-
-  const tokenPayload = (await tokenResponse.json()) as { access_token?: string };
-  if (!tokenPayload.access_token) {
-    return { ok: false as const, message: "Google authentication failed" };
-  }
-
-  const profileResponse = await fetch("https://www.googleapis.com/oauth2/v3/userinfo", {
-    headers: { Authorization: `Bearer ${tokenPayload.access_token}` },
-  });
-
-  if (!profileResponse.ok) {
-    return { ok: false as const, message: "Unable to load Google profile" };
-  }
-
-  const profile = (await profileResponse.json()) as GoogleProfile;
-  if (!profile.email || !profile.sub) {
-    return { ok: false as const, message: "Google account is missing an email address" };
-  }
-
-  const email = normalizeEmail(profile.email);
-  const fullName =
-    profile.name?.trim() ||
-    [profile.given_name, profile.family_name].filter(Boolean).join(" ").trim() ||
-    email.split("@")[0] ||
-    "Google User";
-
-  let user = (await getUserByGoogleId(profile.sub)) || (await getUserByEmail(email));
-
-  if (user) {
-    if (!user.user_enabled) {
-      return { ok: false as const, message: "This account has been disabled" };
-    }
-
-    const [updated] = await db
-      .update(Users)
-      .set({
-        google_id: profile.sub,
-        auth_provider: user.auth_provider === "email" ? "email" : "google",
-        email_verified: true,
-        fullName: user.fullName || fullName,
-        last_login: new Date(),
-        updated_at: new Date(),
-      })
-      .where(eq(Users.user_uuid, user.user_uuid))
-      .returning();
-    user = updated ?? user;
-  } else {
-    const insertValues: typeof Users.$inferInsert = {
-      fullName,
-      email,
-      password: null,
-      google_id: profile.sub,
-      auth_provider: "google",
-      role: "user",
-      email_verified: true,
-      last_login: new Date(),
-    };
-    const [created] = await db.insert(Users).values(insertValues).returning();
-    if (!created) return { ok: false as const, message: "Unable to create account" };
-    user = created;
-  }
-
-  const token = createAccessToken(user.user_uuid, user.role);
-  const redirectUrl = new URL(clientRedirect);
-  redirectUrl.searchParams.set("token", token);
-  redirectUrl.searchParams.set("user", Buffer.from(JSON.stringify(sanitizeUser(user))).toString("base64url"));
-
-  return { ok: true as const, redirectUrl: redirectUrl.toString() };
-};
+export {
+  getGoogleAuthUrl,
+  handleGoogleCallback,
+  getMicrosoftAuthUrl,
+  handleMicrosoftCallback,
+  getAppleAuthUrl,
+  handleAppleCallback,
+  oauthFailRedirect,
+} from "./auth.oauth";

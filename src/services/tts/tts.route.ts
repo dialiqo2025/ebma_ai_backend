@@ -16,6 +16,11 @@ router.post(
   authenticated,
   TtsController.generate,
 );
+router.post(
+  "/generations/:generation_uuid/stream",
+  authenticated,
+  TtsController.stream,
+);
 router.get("/generations/:generation_uuid/audio", authenticated, TtsController.audio);
 
 export default router;

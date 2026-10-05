@@ -107,6 +107,77 @@ export const TtsController = {
     }
   },
 
+  /**
+   * Proxy GPU `stream: true` PCM to the client while persisting a WAV for history.
+   * Response is binary (not JSON envelope). Errors before headers use JSON envelope.
+   */
+  stream: async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const generationUuid = ttsGenerationUuidValidator.parse(
+        req.params.generation_uuid,
+      );
+      const prepared = await TtsProvider.prepareTtsStream(
+        generationUuid,
+        userUuidFromRequest(req),
+      );
+
+      if ("response" in prepared) {
+        sendProviderResponse(res, prepared.response);
+        return;
+      }
+
+      const { stream, complete, fail } = prepared;
+      const chunks: Buffer[] = [];
+
+      res.status(200);
+      res.setHeader(
+        "Content-Type",
+        stream.contentType.startsWith("audio/")
+          ? stream.contentType
+          : "audio/pcm",
+      );
+      res.setHeader("X-Audio-Sample-Rate", String(stream.sampleRate));
+      res.setHeader("X-Audio-Channels", String(stream.channels));
+      res.setHeader("X-Audio-Encoding", stream.encoding);
+      res.setHeader("Cache-Control", "no-store");
+      res.setHeader("X-Accel-Buffering", "no");
+      if (typeof (res as any).flushHeaders === "function") {
+        (res as any).flushHeaders();
+      }
+
+      const reader = stream.body.getReader();
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          const chunk = Buffer.from(value);
+          chunks.push(chunk);
+          if (!res.write(chunk)) {
+            await new Promise<void>((resolve) => res.once("drain", resolve));
+          }
+        }
+        res.end();
+        await complete(Buffer.concat(chunks));
+      } catch (error) {
+        try {
+          await reader.cancel();
+        } catch {
+          /* ignore */
+        }
+        await fail(error);
+        if (!res.writableEnded) {
+          if (!res.headersSent) {
+            next(error);
+            return;
+          }
+          res.destroy(error instanceof Error ? error : undefined);
+        }
+      }
+    } catch (error) {
+      next(error);
+    }
+  },
+
   audio: async (req: Request, res: Response, next: NextFunction) => {
     try {
       const generationUuid = ttsGenerationUuidValidator.parse(

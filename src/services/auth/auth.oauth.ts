@@ -77,6 +77,13 @@ const completeOAuthLogin = async (identity: OAuthIdentity) => {
     if (identity.provider === "google") patch.google_id = providerId;
     if (identity.provider === "microsoft") patch.microsoft_id = providerId;
     if (identity.provider === "apple") patch.apple_id = providerId;
+    // Replace guest UPNs (…#ext#@…) with a decoded mailbox when Microsoft returns one.
+    if (
+      email &&
+      (user.email.toLowerCase().includes("#ext#") || !user.email.includes("@"))
+    ) {
+      patch.email = email;
+    }
 
     const [updated] = await db
       .update(Users)
@@ -283,9 +290,12 @@ export const handleMicrosoftCallback = async (code?: string) => {
     return { ok: false as const, message: "Microsoft authentication failed" };
   }
 
-  const profileResponse = await fetch("https://graph.microsoft.com/v1.0/me", {
-    headers: { Authorization: `Bearer ${tokenPayload.access_token}` },
-  });
+  const profileResponse = await fetch(
+    "https://graph.microsoft.com/v1.0/me?$select=id,displayName,mail,userPrincipalName,otherMails",
+    {
+      headers: { Authorization: `Bearer ${tokenPayload.access_token}` },
+    },
+  );
 
   if (!profileResponse.ok) {
     return { ok: false as const, message: "Unable to load Microsoft profile" };
@@ -295,6 +305,7 @@ export const handleMicrosoftCallback = async (code?: string) => {
     id?: string;
     mail?: string | null;
     userPrincipalName?: string | null;
+    otherMails?: string[] | null;
     displayName?: string | null;
   };
 
@@ -305,9 +316,42 @@ export const handleMicrosoftCallback = async (code?: string) => {
   return completeOAuthLogin({
     provider: "microsoft",
     providerId: profile.id,
-    email: profile.mail || profile.userPrincipalName || null,
+    email: resolveMicrosoftEmail(profile),
     fullName: profile.displayName ?? null,
   });
+};
+
+/** Prefer Graph mail; decode guest UPNs like user_domain.com#EXT#@tenant.onmicrosoft.com → user@domain.com */
+const resolveMicrosoftEmail = (profile: {
+  mail?: string | null;
+  userPrincipalName?: string | null;
+  otherMails?: string[] | null;
+}): string | null => {
+  const candidates = [
+    profile.mail,
+    ...(profile.otherMails ?? []),
+    profile.userPrincipalName,
+  ].filter((value): value is string => Boolean(value?.trim()));
+
+  for (const raw of candidates) {
+    const email = decodeMicrosoftGuestUpn(raw.trim());
+    if (email.includes("@") && !email.toLowerCase().includes("#ext#")) {
+      return email;
+    }
+  }
+
+  return candidates[0] ? decodeMicrosoftGuestUpn(candidates[0].trim()) : null;
+};
+
+const decodeMicrosoftGuestUpn = (value: string): string => {
+  const extMarker = value.toLowerCase().indexOf("#ext#");
+  if (extMarker === -1) return value;
+
+  const local = value.slice(0, extMarker);
+  const atIndex = local.lastIndexOf("_");
+  if (atIndex <= 0 || atIndex === local.length - 1) return value;
+
+  return `${local.slice(0, atIndex)}@${local.slice(atIndex + 1)}`;
 };
 
 const appleConfig = () => {

@@ -9,8 +9,10 @@ router.route("/sign-up/verify-otp").post(AuthController.verifySignUpOtp);
 router.route("/sign-up/resend-otp").post(AuthController.resendSignUpOtp);
 
 router.route("/sign-in").post(AuthController.signIn);
-
 router.route("/sign-in/verify-otp").post(AuthController.verifySignInOtp);
+
+router.get("/google", AuthController.googleStart);
+router.get("/google/callback", AuthController.googleCallback);
 
 router
   .route("/update-profile")

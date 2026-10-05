@@ -1,0 +1,1 @@
+ALTER TABLE "billing_transactions" ADD COLUMN "payment_method" varchar(32) DEFAULT 'stripe' NOT NULL;

@@ -1,0 +1,1 @@
+ALTER TABLE "billing_plans" ADD COLUMN "llm_mode" varchar(20) DEFAULT 'platform' NOT NULL;

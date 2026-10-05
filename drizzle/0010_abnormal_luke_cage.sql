@@ -1,0 +1,1 @@
+ALTER TABLE "billing_plans" ADD COLUMN "benefits" jsonb DEFAULT '[]'::jsonb NOT NULL;

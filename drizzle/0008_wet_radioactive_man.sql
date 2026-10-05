@@ -1,0 +1,1 @@
+ALTER TABLE "billing_plans" ADD COLUMN "features" jsonb DEFAULT '{"stt":true,"tts":true,"llm":true}'::jsonb NOT NULL;

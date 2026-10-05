@@ -1,6 +1,6 @@
 import { and, desc, eq, gte, lte, sql } from "drizzle-orm";
 import { db } from "../../config/database/connection.database";
-import { BillingUsageLedger, BillingWallets } from "../../schema";
+import { BillingRates, BillingUsageLedger, BillingWallets } from "../../schema";
 import { GenResObj } from "../../utils/responseFormat.util";
 import { HttpStatusCodes as Code } from "../../utils/httpType.util";
 
@@ -9,6 +9,11 @@ export const BILLING_PRICES = {
   stt_seconds: Number(process.env.BILLING_STT_CREDITS_PER_SECOND ?? 1),
   llm_tokens: Number(process.env.BILLING_LLM_CREDITS_PER_TOKEN ?? 1),
 } as const;
+
+const currentPrices = async () => {
+  const rows = await db.select().from(BillingRates);
+  return { ...BILLING_PRICES, ...Object.fromEntries(rows.map((row) => [row.usage_type, Number(row.credits_per_unit)])) } as typeof BILLING_PRICES;
+};
 
 const initialCredits = () => {
   const value = Number(process.env.BILLING_INITIAL_CREDITS ?? 1000);
@@ -33,7 +38,8 @@ export const recordUsage = async (input: {
   metadata?: Record<string, unknown>;
 }) => {
   if (!Number.isFinite(input.quantity) || input.quantity <= 0) return;
-  const unitPrice = BILLING_PRICES[input.type];
+  const prices = await currentPrices();
+  const unitPrice = prices[input.type];
   const charged = input.quantity * unitPrice;
   try {
     await ensureWallet(input.userUuid);
@@ -60,6 +66,7 @@ export const recordUsage = async (input: {
 
 export const getBillingSummary = async (userUuid: string) => {
   const wallet = await ensureWallet(userUuid);
+  const prices = await currentPrices();
   const [usage] = await db.select({
     totalCredits: sql<string>`coalesce(sum(${BillingUsageLedger.charged_credits}), 0)`,
     totalQuantity: sql<string>`coalesce(sum(${BillingUsageLedger.quantity}), 0)`,
@@ -71,9 +78,9 @@ export const getBillingSummary = async (userUuid: string) => {
     usedCredits: Number(usage?.totalCredits ?? 0),
     usageQuantity: Number(usage?.totalQuantity ?? 0),
     pricing: {
-      tts_characters: { unit: "character", creditsPerUnit: BILLING_PRICES.tts_characters, example: `1,000 characters = ${formatCredits(1000 * BILLING_PRICES.tts_characters)} credits` },
-      stt_seconds: { unit: "second", creditsPerUnit: BILLING_PRICES.stt_seconds, example: `60 seconds = ${formatCredits(60 * BILLING_PRICES.stt_seconds)} credits` },
-      llm_tokens: { unit: "token", creditsPerUnit: BILLING_PRICES.llm_tokens, example: `1,000 tokens = ${formatCredits(1000 * BILLING_PRICES.llm_tokens)} credits` },
+      tts_characters: { unit: "character", creditsPerUnit: prices.tts_characters, example: `1,000 characters = ${formatCredits(1000 * prices.tts_characters)} credits` },
+      stt_seconds: { unit: "second", creditsPerUnit: prices.stt_seconds, example: `60 seconds = ${formatCredits(60 * prices.stt_seconds)} credits` },
+      llm_tokens: { unit: "token", creditsPerUnit: prices.llm_tokens, example: `1,000 tokens = ${formatCredits(1000 * prices.llm_tokens)} credits` },
     },
   });
 };

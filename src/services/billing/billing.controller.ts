@@ -58,5 +58,20 @@ export const BillingController = {
   },
   adminSubscriptions: async (_req: Request, res: Response) => { const result = await AdminBilling.listSubscriptions(); res.status(result.code).json(result.data); },
   adminTransactions: async (_req: Request, res: Response) => { const result = await AdminBilling.listTransactions(); res.status(result.code).json(result.data); },
+  adminUserWallet: async (req: Request, res: Response) => {
+    const result = await AdminBilling.getAdminUserWallet(String(req.params.user_uuid));
+    res.status(result.code).json(result.data);
+  },
+  adminGrantCredits: async (req: Request, res: Response) => {
+    const credits = Number(req.body?.credits);
+    const note = typeof req.body?.note === "string" ? req.body.note : undefined;
+    const result = await AdminBilling.grantAdminUserCredits({
+      userUuid: String(req.params.user_uuid),
+      credits,
+      grantedByUuid: userId(req),
+      note,
+    });
+    res.status(result.code).json(result.data);
+  },
   capabilities: async (req: Request, res: Response) => { const result = await AdminBilling.getUserCapabilities(userId(req)); res.status(result.code).json(result.data); },
 };

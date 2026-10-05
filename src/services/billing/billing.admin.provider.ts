@@ -1,6 +1,14 @@
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 import { db } from "../../config/database/connection.database";
-import { BillingPlans, BillingRates, BillingSubscriptions, BillingTransactions } from "../../schema";
+import {
+  BillingPlans,
+  BillingRates,
+  BillingSubscriptions,
+  BillingTransactions,
+  BillingWallets,
+  Users,
+} from "../../schema";
+import { ensureWallet } from "./billing.provider";
 import { GenResObj } from "../../utils/responseFormat.util";
 import { HttpStatusCodes as Code } from "../../utils/httpType.util";
 
@@ -63,6 +71,84 @@ export const listUserTransactions = async (userUuid: string) => GenResObj(Code.O
 export const getUserTransaction = async (userUuid: string, transactionUuid: string) => {
   const [row] = await db.select({ transaction: BillingTransactions, plan: BillingPlans }).from(BillingTransactions).leftJoin(BillingPlans, eq(BillingTransactions.plan_uuid, BillingPlans.plan_uuid)).where(and(eq(BillingTransactions.user_uuid, userUuid), eq(BillingTransactions.transaction_uuid, transactionUuid))).limit(1);
   return row ? GenResObj(Code.OK, true, "Transaction fetched successfully", row) : GenResObj(Code.NOT_FOUND, false, "Transaction not found");
+};
+
+export const getAdminUserWallet = async (userUuid: string) => {
+  const [user] = await db
+    .select({
+      user_uuid: Users.user_uuid,
+      email: Users.email,
+      fullName: Users.fullName,
+    })
+    .from(Users)
+    .where(eq(Users.user_uuid, userUuid))
+    .limit(1);
+
+  if (!user) return GenResObj(Code.NOT_FOUND, false, "User not found");
+
+  const wallet = await ensureWallet(userUuid);
+  return GenResObj(Code.OK, true, "Wallet fetched successfully", {
+    user_uuid: user.user_uuid,
+    email: user.email,
+    fullName: user.fullName,
+    balanceCredits: Number(wallet?.balance_credits ?? 0),
+  });
+};
+
+export const grantAdminUserCredits = async (input: {
+  userUuid: string;
+  credits: number;
+  grantedByUuid: string;
+  note?: string;
+}) => {
+  if (!Number.isFinite(input.credits) || input.credits <= 0) {
+    return GenResObj(Code.BAD_REQUEST, false, "Credits must be a positive number");
+  }
+
+  const [user] = await db
+    .select({ user_uuid: Users.user_uuid })
+    .from(Users)
+    .where(eq(Users.user_uuid, input.userUuid))
+    .limit(1);
+
+  if (!user) return GenResObj(Code.NOT_FOUND, false, "User not found");
+
+  await ensureWallet(input.userUuid);
+
+  await db.transaction(async (tx) => {
+    await tx
+      .update(BillingWallets)
+      .set({
+        balance_credits: sql`${BillingWallets.balance_credits} + ${input.credits}`,
+        updated_at: new Date(),
+      })
+      .where(eq(BillingWallets.user_uuid, input.userUuid));
+
+    await tx.insert(BillingTransactions).values({
+      user_uuid: input.userUuid,
+      amount_minor: 0,
+      currency: "INR",
+      payment_method: "admin_grant",
+      status: "succeeded",
+      metadata: {
+        credits: input.credits,
+        grantedBy: input.grantedByUuid,
+        note: input.note?.trim() || null,
+      },
+    });
+  });
+
+  const [wallet] = await db
+    .select()
+    .from(BillingWallets)
+    .where(eq(BillingWallets.user_uuid, input.userUuid))
+    .limit(1);
+
+  return GenResObj(Code.OK, true, "Credits added successfully", {
+    user_uuid: input.userUuid,
+    grantedCredits: input.credits,
+    balanceCredits: Number(wallet?.balance_credits ?? 0),
+  });
 };
 
 export const getUserCapabilities = async (userUuid: string) => {

@@ -254,6 +254,51 @@ export const BillingController = {
     const result = await AdminBilling.assignUserPlan(String(req.params.user_uuid), planUuid);
     res.status(result.code).json(result.data);
   },
+  createEnterpriseRequest: async (req: Request, res: Response) => {
+    const result = await AdminBilling.createEnterprisePlanRequest({
+      userUuid: userId(req),
+      companyName: String(req.body?.companyName || ""),
+      contactName: String(req.body?.contactName || ""),
+      email: String(req.body?.email || ""),
+      phone: typeof req.body?.phone === "string" ? req.body.phone : undefined,
+      message: typeof req.body?.message === "string" ? req.body.message : undefined,
+      estimatedMonthlyUsage:
+        typeof req.body?.estimatedMonthlyUsage === "string"
+          ? req.body.estimatedMonthlyUsage
+          : undefined,
+    });
+    res.status(result.code).json(result.data);
+  },
+  myEnterpriseRequests: async (req: Request, res: Response) => {
+    const result = await AdminBilling.listMyEnterprisePlanRequests(userId(req));
+    res.status(result.code).json(result.data);
+  },
+  adminEnterpriseRequests: async (req: Request, res: Response) => {
+    const status = typeof req.query.status === "string" ? req.query.status : undefined;
+    const result = await AdminBilling.listEnterprisePlanRequests(status);
+    res.status(result.code).json(result.data);
+  },
+  adminEnterpriseRequestUpdate: async (req: Request, res: Response) => {
+    const status = typeof req.body?.status === "string" ? req.body.status : undefined;
+    const result = await AdminBilling.updateEnterprisePlanRequest(
+      String(req.params.request_uuid),
+      {
+        ...(status
+          ? { status: status as import("./billing.admin.provider").EnterpriseRequestStatus }
+          : {}),
+        ...(typeof req.body?.adminNote === "string" ? { adminNote: req.body.adminNote } : {}),
+        ...(req.body?.assignedPlanUuid !== undefined
+          ? {
+              assignedPlanUuid:
+                req.body.assignedPlanUuid === null || req.body.assignedPlanUuid === ""
+                  ? null
+                  : String(req.body.assignedPlanUuid),
+            }
+          : {}),
+      },
+    );
+    res.status(result.code).json(result.data);
+  },
   capabilities: async (req: Request, res: Response) => {
     const result = await AdminBilling.getUserCapabilities(userId(req));
     res.status(result.code).json(result.data);

@@ -15,6 +15,8 @@ router.get("/transactions", authenticated, BillingController.transactions);
 router.get("/transactions/:transaction_uuid", authenticated, BillingController.transaction);
 router.post("/subscriptions/:subscription_uuid/cancel", authenticated, BillingController.cancelSubscription);
 router.get("/capabilities", authenticated, BillingController.capabilities);
+router.post("/enterprise-requests", authenticated, BillingController.createEnterpriseRequest);
+router.get("/enterprise-requests/me", authenticated, BillingController.myEnterpriseRequests);
 const superAdmin = authCheck(["superAdmin"]);
 router.get("/admin/plans", superAdmin, BillingController.adminPlans);
 router.post("/admin/plans", superAdmin, BillingController.adminPlans);
@@ -27,4 +29,10 @@ router.get("/admin/transactions", superAdmin, BillingController.adminTransaction
 router.get("/admin/users/:user_uuid/wallet", superAdmin, BillingController.adminUserWallet);
 router.post("/admin/users/:user_uuid/credits", superAdmin, BillingController.adminGrantCredits);
 router.put("/admin/users/:user_uuid/plan", superAdmin, BillingController.adminAssignUserPlan);
+router.get("/admin/enterprise-requests", superAdmin, BillingController.adminEnterpriseRequests);
+router.patch(
+  "/admin/enterprise-requests/:request_uuid",
+  superAdmin,
+  BillingController.adminEnterpriseRequestUpdate,
+);
 export default router;

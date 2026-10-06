@@ -6,6 +6,7 @@ import {
   BillingSubscriptions,
   BillingTransactions,
   BillingWallets,
+  EnterprisePlanRequests,
   Users,
 } from "../../schema";
 import { ensureDefaultPaygSubscription, ensureWallet } from "./billing.provider";
@@ -31,6 +32,8 @@ type PlanWriteInput = {
   llmCreditsPer1000Tokens?: number | null;
   isDefault?: boolean;
   contactOnly?: boolean;
+  /** false = private enterprise plan (hidden from Pricing, assignable by superadmin) */
+  isPublic?: boolean;
 };
 
 const normalizeRate = (value: number | null | undefined) => {
@@ -52,6 +55,11 @@ export const createPlan = async (input: PlanWriteInput) => {
   const code = input.code.trim().toLowerCase();
   const isDefault = Boolean(input.isDefault);
   const contactOnly = Boolean(input.contactOnly);
+  const resolvedPublic = contactOnly
+    ? true
+    : input.isPublic === undefined
+      ? true
+      : Boolean(input.isPublic);
 
   if (isDefault) {
     await db
@@ -77,6 +85,7 @@ export const createPlan = async (input: PlanWriteInput) => {
       llm_credits_per_1000_tokens: normalizeRate(input.llmCreditsPer1000Tokens),
       is_default: isDefault && !contactOnly,
       contact_only: contactOnly,
+      is_public: resolvedPublic,
       features: { ...(input.features ?? { stt: true, tts: true }), llm: true },
       benefits: input.benefits ?? [],
       active: input.active ?? true,
@@ -103,6 +112,7 @@ export const updatePlan = async (
     llmCreditsPer1000Tokens: number | null;
     isDefault: boolean;
     contactOnly: boolean;
+    isPublic: boolean;
   }>,
 ) => {
   if (input.isDefault === true) {
@@ -145,9 +155,10 @@ export const updatePlan = async (
       ...(input.contactOnly !== undefined
         ? {
             contact_only: Boolean(input.contactOnly),
-            ...(input.contactOnly ? { is_default: false } : {}),
+            ...(input.contactOnly ? { is_default: false, is_public: true } : {}),
           }
         : {}),
+      ...(input.isPublic !== undefined ? { is_public: Boolean(input.isPublic) } : {}),
       ...(input.features !== undefined
         ? { features: { ...input.features, llm: true } }
         : {}),
@@ -166,11 +177,10 @@ export const listPublicPlans = async () => {
   const rows = await db
     .select()
     .from(BillingPlans)
-    .where(eq(BillingPlans.active, true))
+    .where(and(eq(BillingPlans.active, true), eq(BillingPlans.is_public, true)))
     .orderBy(desc(BillingPlans.created_at));
   return GenResObj(Code.OK, true, "Available plans fetched successfully", rows);
 };
-
 export const deletePlan = async (planUuid: string) => {
   const [plan] = await db
     .delete(BillingPlans)
@@ -323,7 +333,11 @@ export const assignUserPlan = async (userUuid: string, planUuid: string) => {
     .limit(1);
   if (!plan || !plan.active) return GenResObj(Code.NOT_FOUND, false, "Plan not found");
   if (plan.contact_only) {
-    return GenResObj(Code.BAD_REQUEST, false, "Contact-only plans cannot be assigned from the admin console");
+    return GenResObj(
+      Code.BAD_REQUEST,
+      false,
+      "The public Custom / Contact-us card cannot be assigned. Create a private enterprise plan (isPublic: false) and assign that instead.",
+    );
   }
   if (plan.plan_kind === "wallet_topup") {
     return GenResObj(Code.BAD_REQUEST, false, "Assign a service plan, not a wallet top-up");
@@ -446,4 +460,155 @@ export const getUserCapabilities = async (userUuid: string) => {
       ),
     },
   });
+};
+
+const ENTERPRISE_STATUSES = [
+  "pending",
+  "contacted",
+  "approved",
+  "rejected",
+  "closed",
+] as const;
+
+export type EnterpriseRequestStatus = (typeof ENTERPRISE_STATUSES)[number];
+
+export const createEnterprisePlanRequest = async (input: {
+  userUuid: string;
+  companyName: string;
+  contactName: string;
+  email: string;
+  phone?: string;
+  message?: string;
+  estimatedMonthlyUsage?: string;
+}) => {
+  const companyName = input.companyName.trim();
+  const contactName = input.contactName.trim();
+  const email = input.email.trim().toLowerCase();
+  if (!companyName || !contactName || !email) {
+    return GenResObj(Code.BAD_REQUEST, false, "Company name, contact name, and email are required");
+  }
+
+  const [existing] = await db
+    .select({ request_uuid: EnterprisePlanRequests.request_uuid })
+    .from(EnterprisePlanRequests)
+    .where(
+      and(
+        eq(EnterprisePlanRequests.user_uuid, input.userUuid),
+        eq(EnterprisePlanRequests.status, "pending"),
+      ),
+    )
+    .limit(1);
+
+  if (existing) {
+    return GenResObj(
+      Code.BAD_REQUEST,
+      false,
+      "You already have a pending enterprise request. Our team will follow up soon.",
+    );
+  }
+
+  const [row] = await db
+    .insert(EnterprisePlanRequests)
+    .values({
+      user_uuid: input.userUuid,
+      company_name: companyName,
+      contact_name: contactName,
+      email,
+      phone: input.phone?.trim() || null,
+      message: input.message?.trim() || null,
+      estimated_monthly_usage: input.estimatedMonthlyUsage?.trim() || null,
+      status: "pending",
+    })
+    .returning();
+
+  return GenResObj(Code.CREATED, true, "Enterprise request submitted", row);
+};
+
+export const listMyEnterprisePlanRequests = async (userUuid: string) => {
+  const rows = await db
+    .select()
+    .from(EnterprisePlanRequests)
+    .where(eq(EnterprisePlanRequests.user_uuid, userUuid))
+    .orderBy(desc(EnterprisePlanRequests.created_at));
+  return GenResObj(Code.OK, true, "Enterprise requests fetched", rows);
+};
+
+export const listEnterprisePlanRequests = async (status?: string) => {
+  const rows = await db
+    .select({
+      request: EnterprisePlanRequests,
+      userEmail: Users.email,
+      userFullName: Users.fullName,
+    })
+    .from(EnterprisePlanRequests)
+    .leftJoin(Users, eq(Users.user_uuid, EnterprisePlanRequests.user_uuid))
+    .where(
+      status && ENTERPRISE_STATUSES.includes(status as EnterpriseRequestStatus)
+        ? eq(EnterprisePlanRequests.status, status)
+        : undefined,
+    )
+    .orderBy(desc(EnterprisePlanRequests.created_at));
+
+  return GenResObj(
+    Code.OK,
+    true,
+    "Enterprise requests fetched",
+    rows.map((row) => ({
+      ...row.request,
+      user: { email: row.userEmail, fullName: row.userFullName },
+    })),
+  );
+};
+
+export const updateEnterprisePlanRequest = async (
+  requestUuid: string,
+  input: {
+    status?: EnterpriseRequestStatus;
+    adminNote?: string;
+    assignedPlanUuid?: string | null;
+  },
+) => {
+  if (input.status && !ENTERPRISE_STATUSES.includes(input.status)) {
+    return GenResObj(Code.BAD_REQUEST, false, "Invalid status");
+  }
+
+  if (input.assignedPlanUuid) {
+    const [plan] = await db
+      .select()
+      .from(BillingPlans)
+      .where(eq(BillingPlans.plan_uuid, input.assignedPlanUuid))
+      .limit(1);
+    if (!plan || !plan.active) {
+      return GenResObj(Code.NOT_FOUND, false, "Assigned plan not found");
+    }
+    if (plan.contact_only) {
+      return GenResObj(
+        Code.BAD_REQUEST,
+        false,
+        "Link a private enterprise service plan, not the public Contact-us card",
+      );
+    }
+  }
+
+  const [row] = await db
+    .update(EnterprisePlanRequests)
+    .set({
+      ...(input.status ? { status: input.status } : {}),
+      ...(input.adminNote !== undefined ? { admin_note: input.adminNote.trim() || null } : {}),
+      ...(input.assignedPlanUuid !== undefined
+        ? { assigned_plan_uuid: input.assignedPlanUuid }
+        : {}),
+      updated_at: new Date(),
+    })
+    .where(eq(EnterprisePlanRequests.request_uuid, requestUuid))
+    .returning();
+
+  if (!row) return GenResObj(Code.NOT_FOUND, false, "Enterprise request not found");
+
+  // When approving with a plan, assign it to the user automatically.
+  if (input.status === "approved" && input.assignedPlanUuid) {
+    await assignUserPlan(row.user_uuid, input.assignedPlanUuid);
+  }
+
+  return GenResObj(Code.OK, true, "Enterprise request updated", row);
 };

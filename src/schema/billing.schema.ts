@@ -20,8 +20,13 @@ export const BillingPlans = pgTable("billing_plans", {
   llm_credits_per_1000_tokens: numeric("llm_credits_per_1000_tokens", { precision: 18, scale: 6 }),
   /** When true, new users are auto-assigned this plan (PAYG). */
   is_default: boolean("is_default").default(false).notNull(),
-  /** Marketing-only tier (Contact us); not purchasable. */
+  /** Marketing-only tier (Contact us); not purchasable and not assignable. */
   contact_only: boolean("contact_only").default(false).notNull(),
+  /**
+   * When false, plan is hidden from public Pricing and only assignable by superadmin
+   * (per-customer enterprise / custom deals).
+   */
+  is_public: boolean("is_public").default(true).notNull(),
   features: jsonb("features").$type<{ stt: boolean; tts: boolean; llm: boolean }>().default({ stt: true, tts: true, llm: true }).notNull(),
   benefits: jsonb("benefits").$type<string[]>().default([]).notNull(),
   llm_mode: varchar("llm_mode", { length: 20 }).default("platform").notNull(),
@@ -31,6 +36,33 @@ export const BillingPlans = pgTable("billing_plans", {
   updated_at: timestamp("updated_at", { mode: "date" }).defaultNow().notNull(),
 });
 
+/** User applications for enterprise / custom pricing. Superadmin fulfills by creating + assigning a private plan. */
+export const EnterprisePlanRequests = pgTable(
+  "enterprise_plan_requests",
+  {
+    request_uuid: uuid("request_uuid").defaultRandom().primaryKey(),
+    user_uuid: uuid("user_uuid")
+      .notNull()
+      .references(() => Users.user_uuid, { onDelete: "cascade" }),
+    company_name: varchar("company_name", { length: 255 }).notNull(),
+    contact_name: varchar("contact_name", { length: 255 }).notNull(),
+    email: varchar("email", { length: 255 }).notNull(),
+    phone: varchar("phone", { length: 64 }),
+    message: varchar("message", { length: 2000 }),
+    estimated_monthly_usage: varchar("estimated_monthly_usage", { length: 500 }),
+    status: varchar("status", { length: 32 }).default("pending").notNull(),
+    assigned_plan_uuid: uuid("assigned_plan_uuid").references(() => BillingPlans.plan_uuid, {
+      onDelete: "set null",
+    }),
+    admin_note: varchar("admin_note", { length: 1000 }),
+    created_at: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
+    updated_at: timestamp("updated_at", { mode: "date" }).defaultNow().notNull(),
+  },
+  (table) => ({
+    userIdx: index("enterprise_request_user_idx").on(table.user_uuid),
+    statusIdx: index("enterprise_request_status_idx").on(table.status),
+  }),
+);
 export const BillingRates = pgTable("billing_rates", {
   rate_uuid: uuid("rate_uuid").defaultRandom().primaryKey(),
   usage_type: billingUsageTypeEnum("usage_type").notNull().unique(),

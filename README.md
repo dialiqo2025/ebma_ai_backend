@@ -168,3 +168,26 @@ stores ownership + cached results in `stt_transcriptions`. Poll
 `GET /api/v1/stt/transcriptions/:id` every ~1.5s while `status` is `queued` or `processing`.
 When `completed`, `transcript` and `result` (segments/speakers) are available. Download with
 `?format=txt|srt|vtt`.
+
+## Billing (Stripe + Razorpay)
+
+Checkout supports two payment providers. Omit `provider` (or send `"stripe"`) for the
+existing Stripe Checkout flow. Send `"razorpay"` to create a Razorpay Payment Link instead.
+
+| Env | Purpose |
+|---|---|
+| `STRIPE_SECRET_KEY` / `STRIPE_WEBHOOK_SECRET` | Stripe Checkout + webhook |
+| `STRIPE_CURRENCY` | Stripe amount currency (default `INR`) |
+| `RAZORPAY_KEY_ID` / `RAZORPAY_KEY_SECRET` | Razorpay Payment Links |
+| `RAZORPAY_WEBHOOK_SECRET` | HMAC for `POST /api/v1/billing/webhook/razorpay` |
+| `RAZORPAY_CURRENCY` | Razorpay amount currency (default `INR`) |
+| `FRONTEND_URL` | Success / cancel redirect base for both providers |
+
+Webhooks (raw body, mounted separately so signatures never collide):
+
+- `POST /api/v1/billing/webhook/stripe`
+- `POST /api/v1/billing/webhook/razorpay`
+
+Razorpay v1 is one-time Payment Links only (wallet top-up and plan purchase). Monthly or
+yearly plans paid via Razorpay activate a local service subscription without Razorpay
+auto-renew; true auto-renew remains on Stripe.

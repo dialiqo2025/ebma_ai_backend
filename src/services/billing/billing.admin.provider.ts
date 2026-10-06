@@ -162,5 +162,11 @@ export const getUserCapabilities = async (userUuid: string) => {
     plan: subscription?.plan?.name ?? "No plan",
     subscribed: Boolean(subscription?.plan),
     capabilities: { stt: Boolean(features.stt), tts: Boolean(features.tts), llm: true, llmMode: "user" },
+    paymentProviders: {
+      stripeConfigured: Boolean(process.env.STRIPE_SECRET_KEY?.trim()),
+      razorpayConfigured: Boolean(
+        process.env.RAZORPAY_KEY_ID?.trim() && process.env.RAZORPAY_KEY_SECRET?.trim(),
+      ),
+    },
   });
 };

@@ -7,7 +7,7 @@ import { HttpStatusCodes as Code } from "../../utils/httpType.util";
 
 export const API_KEY_PREFIX = "ebma_sk_";
 const MAX_ACTIVE_KEYS = 10;
-const ALL_SCOPES: ApiKeyScope[] = ["stt", "tts", "llm"];
+const ALL_SCOPES: ApiKeyScope[] = ["stt", "tts", "llm", "translate"];
 
 export const hashApiKey = (key: string) => crypto.createHash("sha256").update(key).digest("hex");
 
@@ -40,7 +40,7 @@ export const createKey = async (userUuid: string, input: { name?: unknown; scope
   const name = parseName(input.name);
   if (!name) return GenResObj(Code.UNPROCESSABLE_ENTITY, false, "A key name is required");
   const scopes = parseScopes(input.scopes);
-  if (!scopes) return GenResObj(Code.UNPROCESSABLE_ENTITY, false, "Scopes must be a non-empty list of stt, tts, llm");
+  if (!scopes) return GenResObj(Code.UNPROCESSABLE_ENTITY, false, "Scopes must be a non-empty list of stt, tts, llm, translate");
   let expiresAt: Date | null = null;
   if (input.expiresInDays !== undefined && input.expiresInDays !== null) {
     const days = Number(input.expiresInDays);

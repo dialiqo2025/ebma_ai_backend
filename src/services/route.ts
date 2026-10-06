@@ -9,6 +9,7 @@ import Llm from "./llm/llm.route";
 import Chat from "./chat/chat.route";
 import Billing from "./billing/billing.route";
 import ApiKey from "./apikey/apikey.route";
+import Translate from "./translate/translate.route";
 
 const router = Router();
 
@@ -21,5 +22,6 @@ router.use("/llm", Llm);
 router.use("/chat", Chat);
 router.use("/billing", Billing);
 router.use("/api-keys", ApiKey);
+router.use("/translate", Translate);
 
 export default router;

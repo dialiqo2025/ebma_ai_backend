@@ -14,6 +14,7 @@ const apiKeyScopeFor = (req: Request): ApiKeyScope | null => {
   const service = req.baseUrl.split("/").pop();
   if (req.path.startsWith("/admin")) return null;
   if (service === "tts" || service === "stt") return service;
+  if (service === "translate") return "translate";
   if (service === "chat") return "llm";
   if (service === "llm" && req.path === "/process") return "llm";
   return null;

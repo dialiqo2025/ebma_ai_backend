@@ -1,7 +1,7 @@
 import { index, jsonb, pgTable, timestamp, uuid, varchar } from "drizzle-orm/pg-core";
 import { Users } from "./user.schema";
 
-export type ApiKeyScope = "stt" | "tts" | "llm";
+export type ApiKeyScope = "stt" | "tts" | "llm" | "translate";
 
 export const ApiKeys = pgTable("api_keys", {
   key_uuid: uuid("key_uuid").defaultRandom().primaryKey(),
@@ -9,7 +9,7 @@ export const ApiKeys = pgTable("api_keys", {
   name: varchar("name", { length: 100 }).notNull(),
   key_prefix: varchar("key_prefix", { length: 24 }).notNull(),
   key_hash: varchar("key_hash", { length: 64 }).notNull().unique(),
-  scopes: jsonb("scopes").$type<ApiKeyScope[]>().default(["stt", "tts", "llm"]).notNull(),
+  scopes: jsonb("scopes").$type<ApiKeyScope[]>().default(["stt", "tts", "llm", "translate"]).notNull(),
   last_used_at: timestamp("last_used_at", { mode: "date" }),
   expires_at: timestamp("expires_at", { mode: "date" }),
   revoked_at: timestamp("revoked_at", { mode: "date" }),

@@ -4,6 +4,7 @@ import { Users } from "../../schema";
 import { GenResObj } from "../../utils/responseFormat.util";
 import { HttpStatusCodes as Code } from "../../utils/httpType.util";
 import { sendUserPasswordUpdatedEmail } from "../user/user.helper";
+import { ensureDefaultPaygSubscription } from "../billing/billing.provider";
 import {
   clearOtpChallenge,
   comparePassword,
@@ -96,6 +97,7 @@ export const verifySignUpOtp = async (payload: signUpOtpVerifyType) => {
   });
 
   if (!verifiedUser) throw new Error("Email verification failed");
+  await ensureDefaultPaygSubscription(verifiedUser.user_uuid);
   const token = createAccessToken(verifiedUser.user_uuid, verifiedUser.role);
   return GenResObj(Code.OK, true, "Email verified successfully", {
     token,
@@ -173,6 +175,8 @@ export const verifySignInOtp = async (payload: signInOtpVerifyType) => {
   });
 
   if (!signedInUser) throw new Error("Sign-in verification failed");
+  if (!signedInUser) throw new Error("Sign-in verification failed");
+  await ensureDefaultPaygSubscription(signedInUser.user_uuid);
   const token = createAccessToken(signedInUser.user_uuid, signedInUser.role);
   return GenResObj(Code.OK, true, "Sign-in verified successfully", {
     token,

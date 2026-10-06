@@ -148,6 +148,20 @@
       "when": 1791300000000,
       "tag": "0020_razorpay_billing_columns",
       "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1791400000000,
+      "tag": "0021_payg_plan_rates",
+      "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "7",
+      "when": 1791500000000,
+      "tag": "0022_plan_llm_rate",
+      "breakpoints": true
     }
   ]
 }

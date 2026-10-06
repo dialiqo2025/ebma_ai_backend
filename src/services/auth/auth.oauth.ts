@@ -11,6 +11,7 @@ import {
   normalizeEmail,
   sanitizeUser,
 } from "./auth.helper";
+import { ensureDefaultPaygSubscription } from "../billing/billing.provider";
 
 type GoogleProfile = {
   sub: string;
@@ -117,6 +118,7 @@ const completeOAuthLogin = async (identity: OAuthIdentity) => {
   }
 
   const token = createAccessToken(user.user_uuid, user.role);
+  await ensureDefaultPaygSubscription(user.user_uuid);
   const redirectUrl = new URL(clientOAuthRedirect());
   redirectUrl.searchParams.set("token", token);
   redirectUrl.searchParams.set(

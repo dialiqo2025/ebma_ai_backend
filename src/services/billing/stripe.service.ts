@@ -26,8 +26,13 @@ export const createCheckoutSession = async (userUuid: string, planUuid: string) 
     ? await db.select().from(BillingPlans).where(eq(BillingPlans.plan_uuid, planUuid)).limit(1)
     : [];
   if (!plan || !plan.active) throw new Error("Plan is not available");
+  if ((plan as { contact_only?: boolean }).contact_only) {
+    throw new Error("This plan requires contacting sales");
+  }
   if (plan.plan_kind === "wallet_topup") throw new Error("Wallet top-ups use the dynamic recharge flow");
-  if (plan.price_minor <= 0) throw new Error("Free plans do not require checkout");
+  if (plan.price_minor <= 0) {
+    throw new Error("This plan uses wallet top-up. Recharge your wallet instead of purchasing a plan.");
+  }
   if (plan.price_minor < minimumChargeMinor(plan.currency)) {
     throw new Error(
       `Plan price is below Stripe's minimum charge. Set it to at least ${plan.currency.toUpperCase() === "INR" ? "₹50" : "0.50"}.`,

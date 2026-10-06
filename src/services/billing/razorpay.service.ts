@@ -86,8 +86,11 @@ export const createCheckoutPaymentLink = async (userUuid: string, planUuid: stri
     ? await db.select().from(BillingPlans).where(eq(BillingPlans.plan_uuid, planUuid)).limit(1)
     : [];
   if (!plan || !plan.active) throw new Error("Plan is not available");
+  if (plan.contact_only) throw new Error("This plan requires contacting sales");
   if (plan.plan_kind === "wallet_topup") throw new Error("Wallet top-ups use the dynamic recharge flow");
-  if (plan.price_minor <= 0) throw new Error("Free plans do not require checkout");
+  if (plan.price_minor <= 0) {
+    throw new Error("This plan uses wallet top-up. Recharge your wallet instead of purchasing a plan.");
+  }
   if (plan.currency.toUpperCase() !== "INR") {
     throw new Error("Razorpay checkout currently supports INR only");
   }

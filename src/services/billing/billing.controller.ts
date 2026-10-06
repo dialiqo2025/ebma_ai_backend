@@ -245,6 +245,15 @@ export const BillingController = {
     });
     res.status(result.code).json(result.data);
   },
+  adminAssignUserPlan: async (req: Request, res: Response) => {
+    const planUuid = String(req.body?.planUuid || "").trim();
+    if (!planUuid) {
+      res.status(422).json({ success: false, message: "planUuid is required", data: null });
+      return;
+    }
+    const result = await AdminBilling.assignUserPlan(String(req.params.user_uuid), planUuid);
+    res.status(result.code).json(result.data);
+  },
   capabilities: async (req: Request, res: Response) => {
     const result = await AdminBilling.getUserCapabilities(userId(req));
     res.status(result.code).json(result.data);

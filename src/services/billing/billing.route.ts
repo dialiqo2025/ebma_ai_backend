@@ -26,4 +26,5 @@ router.get("/admin/subscriptions", superAdmin, BillingController.adminSubscripti
 router.get("/admin/transactions", superAdmin, BillingController.adminTransactions);
 router.get("/admin/users/:user_uuid/wallet", superAdmin, BillingController.adminUserWallet);
 router.post("/admin/users/:user_uuid/credits", superAdmin, BillingController.adminGrantCredits);
+router.put("/admin/users/:user_uuid/plan", superAdmin, BillingController.adminAssignUserPlan);
 export default router;

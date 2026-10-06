@@ -12,6 +12,16 @@ export const BillingPlans = pgTable("billing_plans", {
   billing_interval: varchar("billing_interval", { length: 20 }).default("one_time").notNull(),
   plan_kind: varchar("plan_kind", { length: 20 }).default("service").notNull(),
   monthly_credits: numeric("monthly_credits", { precision: 18, scale: 6 }).default("0").notNull(),
+  /** Credits (₹) charged per 1000 TTS characters. 1 credit = ₹1. */
+  tts_credits_per_1000_chars: numeric("tts_credits_per_1000_chars", { precision: 18, scale: 6 }),
+  /** Credits (₹) charged per 1 minute of STT audio. 1 credit = ₹1. */
+  stt_credits_per_minute: numeric("stt_credits_per_minute", { precision: 18, scale: 6 }),
+  /** Credits (₹) charged per 1,000 LLM tokens. 1 credit = ₹1. */
+  llm_credits_per_1000_tokens: numeric("llm_credits_per_1000_tokens", { precision: 18, scale: 6 }),
+  /** When true, new users are auto-assigned this plan (PAYG). */
+  is_default: boolean("is_default").default(false).notNull(),
+  /** Marketing-only tier (Contact us); not purchasable. */
+  contact_only: boolean("contact_only").default(false).notNull(),
   features: jsonb("features").$type<{ stt: boolean; tts: boolean; llm: boolean }>().default({ stt: true, tts: true, llm: true }).notNull(),
   benefits: jsonb("benefits").$type<string[]>().default([]).notNull(),
   llm_mode: varchar("llm_mode", { length: 20 }).default("platform").notNull(),

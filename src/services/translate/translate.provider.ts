@@ -74,7 +74,12 @@ export const translateText = async (userUuid: string, input: TranslateTextInput)
   let failurePhase = "loading your LLM configuration";
   try {
     failurePhase = "calling your self-hosted translation model";
-    const result = await translate(userUuid, input.input, input.source_language_code, input.target_language_code, input);
+    const result = await translate(userUuid, input.input, input.source_language_code, input.target_language_code, {
+      mode: input.mode,
+      numerals_format: input.numerals_format,
+      ...(input.output_script ? { output_script: input.output_script } : {}),
+      ...(input.speaker_gender ? { speaker_gender: input.speaker_gender } : {}),
+    });
     return GenResObj(Code.OK, true, "Text translated", {
       requestId: result.requestId ?? null,
       translatedText: result.translatedText,
@@ -108,7 +113,12 @@ export const createDocumentTranslation = async (userUuid: string, file: Express.
     const job: LocalJob = { userUuid, jobName: input.job_name || file.originalname, sourceLanguageCode: input.source_language_code, targetLanguageCodes: input.target_language_codes, createdAt: new Date().toISOString() };
     await writeFile(manifestPath(jobId), JSON.stringify(job), "utf8");
     for (const targetCode of input.target_language_codes) {
-      const { translatedText } = await translate(userUuid, sourceText, input.source_language_code, targetCode, { mode: "formal", numerals_format: input.use_native_numerals ? "native" : "international", genre: input.genre, style_guidelines: input.style_guidelines });
+      const { translatedText } = await translate(userUuid, sourceText, input.source_language_code, targetCode, {
+        mode: "formal",
+        numerals_format: input.use_native_numerals ? "native" : "international",
+        ...(input.genre ? { genre: input.genre } : {}),
+        ...(input.style_guidelines ? { style_guidelines: input.style_guidelines } : {}),
+      });
       await writeFile(outputPath(jobId, targetCode), translatedText, "utf8");
     }
     return GenResObj(Code.ACCEPTED, true, "Document translated", {

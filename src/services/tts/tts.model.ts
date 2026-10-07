@@ -1,4 +1,5 @@
 import { audioMimeTypeByFormat } from "./tts.helper";
+import { applyEmotionPrefix } from "./tts.emotion";
 
 const DEFAULT_TIMEOUT_MS = 60_000;
 const DEFAULT_MAX_AUDIO_BYTES = 25 * 1024 * 1024;
@@ -10,6 +11,8 @@ type TtsModelInput = {
   language: string;
   voiceMode: "default" | "clone";
   voiceId?: string;
+  /** Applied as `<|emotion:NAME|>` prefix on `input` for the GPU model. */
+  emotion?: string | null;
   speed: number;
   pitch: number;
   outputFormat: "wav" | "mp3" | "ogg";
@@ -91,7 +94,7 @@ const buildModelHeaders = () => {
 
 /** Payload for EBMA TTS `POST /tts/v1/audio/speech` (OpenAI-style speech API). */
 const buildSpeechRequestBody = (input: TtsModelInput, stream: boolean) => ({
-  input: input.text,
+  input: applyEmotionPrefix(input.text, input.emotion),
   stream,
   temperature: floatFromEnvironment("TTS_MODEL_TEMPERATURE", DEFAULT_TEMPERATURE),
   top_k: positiveIntegerFromEnvironment("TTS_MODEL_TOP_K", DEFAULT_TOP_K),

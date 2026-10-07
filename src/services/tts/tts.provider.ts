@@ -21,6 +21,7 @@ import {
   TtsModelError,
   type TtsModelStream,
 } from "./tts.model";
+import { TTS_EMOTION_OPTIONS, TTS_STYLE_TAG_GROUPS } from "./tts.emotion";
 import { recordUsage } from "../billing/billing.provider";
 import type {
   CreateTtsGeneration,
@@ -55,6 +56,7 @@ export const createTtsGeneration = async (
       language: payload.language,
       voice_mode: payload.voiceMode,
       voice_id: payload.voiceId ?? null,
+      emotion: payload.emotion ?? null,
       speed: payload.speed,
       pitch: payload.pitch,
       audio_format: payload.outputFormat,
@@ -180,6 +182,7 @@ export const updateTtsGeneration = async (
       ...(payload.voiceMode !== undefined || payload.voiceId !== undefined
         ? { voice_id: resultingVoiceId }
         : {}),
+      ...(payload.emotion !== undefined ? { emotion: payload.emotion } : {}),
       ...(payload.speed !== undefined ? { speed: payload.speed } : {}),
       ...(payload.pitch !== undefined ? { pitch: payload.pitch } : {}),
       ...(payload.outputFormat !== undefined ? { audio_format: payload.outputFormat } : {}),
@@ -302,6 +305,7 @@ export const generateTtsAudio = async (generationUuid: string, userUuid: string)
       language: claimed.language,
       voiceMode: claimed.voice_mode,
       ...(claimed.voice_id ? { voiceId: claimed.voice_id } : {}),
+      emotion: claimed.emotion,
       speed: claimed.speed,
       pitch: claimed.pitch,
       outputFormat: claimed.audio_format,
@@ -532,6 +536,7 @@ export const prepareTtsStream = async (
       language: claimed.language,
       voiceMode: claimed.voice_mode,
       ...(claimed.voice_id ? { voiceId: claimed.voice_id } : {}),
+      emotion: claimed.emotion,
       speed: claimed.speed,
       pitch: claimed.pitch,
       outputFormat: claimed.audio_format,
@@ -603,6 +608,8 @@ export const getTtsOptions = () =>
     languages: "model-dependent",
     voiceModes: ["default", "clone"],
     audioFormats: ["wav", "mp3", "ogg"],
+    emotions: TTS_EMOTION_OPTIONS,
+    styleTags: TTS_STYLE_TAG_GROUPS,
     speed: { min: 0.5, max: 1.5, step: 0.1, default: 1 },
     pitch: { min: 0.5, max: 1.5, step: 0.1, default: 1 },
     autoProcess: isTtsAutoProcessEnabled(),

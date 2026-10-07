@@ -87,6 +87,7 @@ export const serializeTtsGeneration = (generation: any) => ({
   language: generation.language,
   voiceMode: generation.voice_mode,
   voiceId: generation.voice_id,
+  emotion: generation.emotion ?? null,
   speed: generation.speed,
   pitch: generation.pitch,
   outputFormat: generation.audio_format,

@@ -23,6 +23,8 @@ export const TtsGenerations = pgTable("tts_generations", {
   language: varchar("language", { length: 32 }).default("auto").notNull(),
   voice_mode: ttsVoiceModeEnum("voice_mode").default("default").notNull(),
   voice_id: varchar("voice_id", { length: 255 }),
+  /** GPU emotion tag name (e.g. anger) — applied as `<|emotion:NAME|>` at synthesize time. */
+  emotion: varchar("emotion", { length: 32 }),
   speed: real("speed").default(1).notNull(),
   pitch: real("pitch").default(1).notNull(),
   audio_format: ttsAudioFormatEnum("audio_format").default("wav").notNull(),

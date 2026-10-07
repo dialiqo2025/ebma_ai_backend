@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { TTS_EMOTIONS } from "./tts.emotion";
 
 const languageValidator = z
   .string()
@@ -6,6 +7,13 @@ const languageValidator = z
   .min(2, "Language is required")
   .max(32, "Language must be at most 32 characters")
   .regex(/^[A-Za-z][A-Za-z0-9_-]*$/, "Language must be a name or language code");
+
+/** Empty string / null from JSON or multipart → null (no emotion). */
+const emotionField = z.preprocess((value) => {
+  if (value === undefined) return undefined;
+  if (value === null || value === "") return null;
+  return value;
+}, z.enum(TTS_EMOTIONS).nullable().optional());
 
 const ttsFields = {
   text: z
@@ -16,8 +24,9 @@ const ttsFields = {
   language: languageValidator.default("auto"),
   voiceMode: z.enum(["default", "clone"]).default("default"),
   voiceId: z.string().trim().min(1).max(255).optional(),
-  speed: z.number().min(0.5).max(1.5).default(1),
-  pitch: z.number().min(0.5).max(1.5).default(1),
+  emotion: emotionField,
+  speed: z.coerce.number().min(0.5).max(1.5).default(1),
+  pitch: z.coerce.number().min(0.5).max(1.5).default(1),
   outputFormat: z.enum(["wav", "mp3", "ogg"]).default("wav"),
 };
 
@@ -43,8 +52,9 @@ export const updateTtsGenerationValidator = requireCloneVoice(
       language: languageValidator.optional(),
       voiceMode: z.enum(["default", "clone"]).optional(),
       voiceId: z.string().trim().min(1).max(255).nullable().optional(),
-      speed: z.number().min(0.5).max(1.5).optional(),
-      pitch: z.number().min(0.5).max(1.5).optional(),
+      emotion: emotionField,
+      speed: z.coerce.number().min(0.5).max(1.5).optional(),
+      pitch: z.coerce.number().min(0.5).max(1.5).optional(),
       outputFormat: z.enum(["wav", "mp3", "ogg"]).optional(),
     })
     .strict()

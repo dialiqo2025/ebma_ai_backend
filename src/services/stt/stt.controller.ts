@@ -92,7 +92,11 @@ export const SttController = {
       const sessionUuid = sttSessionUuidValidator.parse(req.params.session_uuid);
       sendProviderResponse(
         res,
-        await SttProvider.deleteSttSession(sessionUuid, userUuidFromRequest(req)),
+        await SttProvider.deleteSttSession(
+          sessionUuid,
+          userUuidFromRequest(req),
+          req.query.force === "true" || req.query.force === "1",
+        ),
       );
     } catch (error) {
       next(error);

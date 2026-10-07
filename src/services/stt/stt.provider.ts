@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, ilike, sql } from "drizzle-orm";
+import { and, asc, desc, eq, ilike, lt, sql } from "drizzle-orm";
 import { db } from "../../config/database/connection.database";
 import { SttSegments, SttSessions, SttTranscriptions } from "../../schema";
 import { HttpStatusCodes as Code } from "../../utils/httpType.util";
@@ -77,6 +77,42 @@ export const createSttSession = async (userUuid: string, payload: CreateSttSessi
 };
 
 export const listSttSessions = async (userUuid: string, query: ListSttSessions) => {
+  // Live sessions are capped at 20 minutes by the ASR service. Close database
+  // records left behind by a browser that disappeared without calling /finish.
+  const staleBefore = new Date(Date.now() - 25 * 60 * 1000);
+  const staleSessions = await db
+    .select({ sessionUuid: SttSessions.session_uuid })
+    .from(SttSessions)
+    .where(
+      and(
+        eq(SttSessions.user_uuid, userUuid),
+        lt(SttSessions.updated_at, staleBefore),
+        sql`${SttSessions.status} in ('connecting', 'streaming')`,
+      ),
+    );
+
+  for (const stale of staleSessions) {
+    await db
+      .update(SttSessions)
+      .set({
+        status: "failed",
+        transcript: sql`coalesce((select string_agg(${SttSegments.text}, ' ' order by ${SttSegments.segment_index}) from ${SttSegments} where ${SttSegments.session_uuid} = ${stale.sessionUuid}), '')`,
+        phrase_count: sql`(select count(*)::int from ${SttSegments} where ${SttSegments.session_uuid} = ${stale.sessionUuid})`,
+        audio_duration_seconds: sql`coalesce((select sum(${SttSegments.audio_seconds}) from ${SttSegments} where ${SttSegments.session_uuid} = ${stale.sessionUuid}), 0)`,
+        error_code: "session_expired",
+        error_message: "The live session expired before it could be closed cleanly.",
+        completed_at: new Date(),
+        updated_at: new Date(),
+      })
+      .where(
+        and(
+          eq(SttSessions.session_uuid, stale.sessionUuid),
+          eq(SttSessions.user_uuid, userUuid),
+          sql`${SttSessions.status} in ('connecting', 'streaming')`,
+        ),
+      );
+  }
+
   const offset = (query.page - 1) * query.page_size;
   const filters = and(
     eq(SttSessions.user_uuid, userUuid),
@@ -187,11 +223,15 @@ export const updateSttSession = async (
   });
 };
 
-export const deleteSttSession = async (sessionUuid: string, userUuid: string) => {
+export const deleteSttSession = async (
+  sessionUuid: string,
+  userUuid: string,
+  force = false,
+) => {
   const existing = await findOwnedSession(sessionUuid, userUuid);
   if (!existing) return GenResObj(Code.NOT_FOUND, false, "STT session not found");
 
-  if (existing.status === "connecting" || existing.status === "streaming") {
+  if (!force && (existing.status === "connecting" || existing.status === "streaming")) {
     return GenResObj(
       Code.CONFLICT,
       false,

@@ -107,6 +107,10 @@ directly to the GPU WebSocket. Raw audio does not pass through or get stored by 
 | `GET` | `/api/v1/stt/transcriptions/:transcription_uuid/download` | Download `txt` / `srt` / `vtt` |
 | `DELETE` | `/api/v1/stt/transcriptions/:transcription_uuid` | Cancel or delete a job |
 
+Deleting a `connecting` or `streaming` session requires `?force=true`. This removes its saved
+record but cannot close a browser's GPU WebSocket. The UI asks the user to confirm this and
+stops the session first when it is running in the same tab.
+
 Create a session:
 
 ```json

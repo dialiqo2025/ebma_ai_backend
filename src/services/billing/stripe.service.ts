@@ -12,6 +12,7 @@ import {
   grantPurchaseFromTransaction,
   minimumChargeMinor,
 } from "./billing.grant";
+import { stripePaymentMethodTypes } from "./payment-providers.config";
 
 const stripe = () => {
   const key = process.env.STRIPE_SECRET_KEY;
@@ -53,7 +54,7 @@ export const createCheckoutSession = async (userUuid: string, planUuid: string) 
       currency: plan.currency,
       payment_method: "stripe",
       status: "pending",
-      metadata: { planKind: plan.plan_kind },
+      metadata: { planKind: plan.plan_kind, paymentProvider: "stripe" },
     })
     .returning();
   if (!transaction) throw new Error("Unable to create payment transaction");
@@ -81,6 +82,7 @@ export const createCheckoutSession = async (userUuid: string, planUuid: string) 
   const params = {
     mode: recurring ? "subscription" : "payment",
     managed_payments: { enabled: false },
+    payment_method_types: stripePaymentMethodTypes() as Stripe.Checkout.SessionCreateParams.PaymentMethodType[],
     customer_email: user?.email || undefined,
     line_items: [lineItem],
     success_url: `${appUrl()}/platform/billing?checkout=success&session_id={CHECKOUT_SESSION_ID}`,
@@ -134,13 +136,14 @@ export const createWalletTopupCheckout = async (userUuid: string, amount: number
       currency: moneyCurrency,
       payment_method: "stripe",
       status: "pending",
-      metadata: { planKind: "wallet_topup", credits },
+      metadata: { planKind: "wallet_topup", credits, paymentProvider: "stripe" },
     })
     .returning();
   if (!transaction) throw new Error("Unable to create payment transaction");
   const session = await stripe().checkout.sessions.create({
     mode: "payment",
     managed_payments: { enabled: false },
+    payment_method_types: stripePaymentMethodTypes() as Stripe.Checkout.SessionCreateParams.PaymentMethodType[],
     customer_email: user?.email || undefined,
     line_items: [
       {
@@ -175,23 +178,93 @@ export const createWalletTopupCheckout = async (userUuid: string, amount: number
   };
 };
 
+const instrumentFromStripeSession = async (session: Stripe.Checkout.Session) => {
+  const detail: Record<string, unknown> = { provider: "stripe" };
+  let paymentMethod: string | null = null;
+
+  try {
+    const paymentIntentId =
+      typeof session.payment_intent === "string"
+        ? session.payment_intent
+        : session.payment_intent && typeof session.payment_intent === "object"
+          ? session.payment_intent.id
+          : null;
+
+    if (paymentIntentId) {
+      const pi = await stripe().paymentIntents.retrieve(paymentIntentId, {
+        expand: ["payment_method", "latest_charge"],
+      });
+      const pm =
+        typeof pi.payment_method === "object" && pi.payment_method
+          ? pi.payment_method
+          : null;
+      const type = pm?.type || pi.payment_method_types?.[0] || null;
+      if (type) {
+        paymentMethod = String(type).slice(0, 32);
+        detail.method = paymentMethod;
+      }
+      if (pm?.card) {
+        if (pm.card.brand) detail.network = pm.card.brand;
+        if (pm.card.last4) detail.last4 = pm.card.last4;
+      }
+      const charge =
+        typeof pi.latest_charge === "object" && pi.latest_charge
+          ? pi.latest_charge
+          : null;
+      const pmd = charge?.payment_method_details;
+      if (pmd?.type && !paymentMethod) {
+        paymentMethod = String(pmd.type).slice(0, 32);
+        detail.method = paymentMethod;
+      }
+      if (pmd?.type === "upi" && pmd.upi?.vpa) detail.vpa = pmd.upi.vpa;
+      if (pmd?.type === "card" && pmd.card) {
+        if (pmd.card.brand) detail.network = pmd.card.brand;
+        if (pmd.card.last4) detail.last4 = pmd.card.last4;
+      }
+    } else if (session.payment_method_types?.[0]) {
+      paymentMethod = String(session.payment_method_types[0]).slice(0, 32);
+      detail.method = paymentMethod;
+    }
+  } catch {
+    // Fall back to gateway label if Stripe expand fails.
+  }
+
+  return {
+    paymentMethod: paymentMethod || "stripe",
+    detail: paymentMethod ? detail : { provider: "stripe" },
+  };
+};
+
 const grantFromStripeSession = async (session: Stripe.Checkout.Session) => {
   const { userUuid, planUuid, transactionUuid } = session.metadata || {};
   if (!userUuid || !transactionUuid) return;
+  const instrument = await instrumentFromStripeSession(session);
   await grantPurchaseFromTransaction({
     userUuid,
     transactionUuid,
     planUuid: planUuid || null,
     creditsFromTopup: Number(session.metadata?.credits || 0),
     stripePaymentIntentId:
-      typeof session.payment_intent === "string" ? session.payment_intent : null,
+      typeof session.payment_intent === "string"
+        ? session.payment_intent
+        : session.payment_intent && typeof session.payment_intent === "object"
+          ? session.payment_intent.id
+          : null,
     stripeSubscriptionId:
-      typeof session.subscription === "string" ? session.subscription : null,
+      typeof session.subscription === "string"
+        ? session.subscription
+        : session.subscription && typeof session.subscription === "object"
+          ? session.subscription.id
+          : null,
+    paymentMethod: instrument.paymentMethod,
+    paymentMethodDetail: instrument.detail,
   });
 };
 
 export const confirmCheckoutSession = async (userUuid: string, sessionId: string) => {
-  const session = await stripe().checkout.sessions.retrieve(sessionId);
+  const session = await stripe().checkout.sessions.retrieve(sessionId, {
+    expand: ["payment_intent", "payment_intent.payment_method"],
+  });
   if (session.metadata?.userUuid !== userUuid) {
     throw new Error("Checkout session does not belong to this user");
   }

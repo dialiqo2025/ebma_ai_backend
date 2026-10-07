@@ -9,6 +9,7 @@ import {
   isRazorpayConfigured,
   minimumChargeMinor,
 } from "./billing.grant";
+import { razorpayCheckoutMethodFlags } from "./payment-providers.config";
 
 const razorpay = () => {
   const keyId = process.env.RAZORPAY_KEY_ID?.trim();
@@ -57,12 +58,7 @@ const createPaymentLink = async (input: {
     notes: input.notes,
     options: {
       checkout: {
-        method: {
-          upi: true,
-          card: true,
-          netbanking: true,
-          wallet: false,
-        },
+        method: razorpayCheckoutMethodFlags(),
       },
     },
   } as any);
@@ -116,7 +112,7 @@ export const createCheckoutPaymentLink = async (userUuid: string, planUuid: stri
       currency: plan.currency,
       payment_method: "razorpay",
       status: "pending",
-      metadata: { planKind: plan.plan_kind },
+      metadata: { planKind: plan.plan_kind, paymentProvider: "razorpay" },
     })
     .returning();
   if (!transaction) throw new Error("Unable to create payment transaction");
@@ -171,7 +167,7 @@ export const createWalletTopupPaymentLink = async (userUuid: string, amount: num
       currency: moneyCurrency,
       payment_method: "razorpay",
       status: "pending",
-      metadata: { planKind: "wallet_topup", credits },
+      metadata: { planKind: "wallet_topup", credits, paymentProvider: "razorpay" },
     })
     .returning();
   if (!transaction) throw new Error("Unable to create payment transaction");
@@ -221,17 +217,63 @@ const notesFrom = (value: unknown): PaymentLinkNotes | null => {
   };
 };
 
+/** Normalize Razorpay `method` + optional extras for storage / UI. */
+const instrumentFromRazorpayPayment = (payment: any) => {
+  const method = String(payment?.method || "")
+    .trim()
+    .toLowerCase();
+  if (!method) return { paymentMethod: null as string | null, detail: null as Record<string, unknown> | null };
+
+  const detail: Record<string, unknown> = { provider: "razorpay", method };
+  if (method === "card" && payment?.card) {
+    const card = payment.card;
+    if (card.network) detail.network = String(card.network);
+    if (card.last4) detail.last4 = String(card.last4);
+    if (card.type) detail.cardType = String(card.type);
+  } else if (method === "upi") {
+    if (payment?.vpa) detail.vpa = String(payment.vpa);
+  } else if (method === "netbanking") {
+    if (payment?.bank) detail.bank = String(payment.bank);
+  } else if (method === "wallet" && payment?.wallet) {
+    detail.wallet = String(payment.wallet);
+  }
+
+  return { paymentMethod: method.slice(0, 32), detail };
+};
+
+const fetchRazorpayInstrument = async (paymentId: string | null | undefined) => {
+  if (!paymentId) {
+    return { paymentMethod: null as string | null, detail: null as Record<string, unknown> | null };
+  }
+  try {
+    const payment = await razorpay().payments.fetch(paymentId);
+    return instrumentFromRazorpayPayment(payment);
+  } catch {
+    return { paymentMethod: null, detail: null };
+  }
+};
+
 const grantFromNotes = async (
   notes: PaymentLinkNotes,
   paymentId?: string | null,
-) =>
-  grantPurchaseFromTransaction({
+  paymentEntity?: any,
+) => {
+  const fromEntity = paymentEntity ? instrumentFromRazorpayPayment(paymentEntity) : null;
+  const fetched =
+    fromEntity?.paymentMethod
+      ? fromEntity
+      : await fetchRazorpayInstrument(paymentId);
+
+  return grantPurchaseFromTransaction({
     userUuid: notes.userUuid,
     transactionUuid: notes.transactionUuid,
     planUuid: notes.planUuid ?? null,
     creditsFromTopup: notes.credits ? Number(notes.credits) : 0,
     razorpayPaymentId: paymentId ?? null,
+    paymentMethod: fetched.paymentMethod,
+    paymentMethodDetail: fetched.detail,
   });
+};
 
 export const confirmRazorpayCheckout = async (userUuid: string, paymentLinkId: string) => {
   const client = razorpay();
@@ -305,9 +347,10 @@ export const handleRazorpayWebhook = async (
 
   if (type === "payment_link.paid" || type === "payment_link.partially_paid") {
     const entity = event.payload?.payment_link?.entity || event.payload?.payment_link;
+    const paymentEntity = event.payload?.payment?.entity || null;
     const notes = notesFrom(entity?.notes);
     const paymentId =
-      event.payload?.payment?.entity?.id ||
+      paymentEntity?.id ||
       entity?.payments?.[0]?.payment_id ||
       null;
     if (notes) {
@@ -321,7 +364,7 @@ export const handleRazorpayWebhook = async (
           })
           .where(eq(BillingTransactions.transaction_uuid, notes.transactionUuid));
       }
-      await grantFromNotes(notes, paymentId ? String(paymentId) : null);
+      await grantFromNotes(notes, paymentId ? String(paymentId) : null, paymentEntity);
     }
   }
 
@@ -329,7 +372,11 @@ export const handleRazorpayWebhook = async (
     const payment = event.payload?.payment?.entity;
     const notes = notesFrom(payment?.notes);
     if (notes) {
-      await grantFromNotes(notes, payment?.id ? String(payment.id) : null);
+      await grantFromNotes(
+        notes,
+        payment?.id ? String(payment.id) : null,
+        payment,
+      );
     }
   }
 

@@ -15,6 +15,9 @@ export type GrantPurchaseInput = {
   stripePaymentIntentId?: string | null;
   stripeSubscriptionId?: string | null;
   razorpayPaymentId?: string | null;
+  /** Instrument used at the gateway: card | upi | netbanking | wallet | … */
+  paymentMethod?: string | null;
+  paymentMethodDetail?: Record<string, unknown> | null;
 };
 
 /**
@@ -29,8 +32,44 @@ export const grantPurchaseFromTransaction = async (input: GrantPurchaseInput) =>
     .where(eq(BillingTransactions.transaction_uuid, transactionUuid))
     .limit(1);
 
-  if (!transaction || transaction.status === "succeeded") return false;
+  if (!transaction) return false;
   if (transaction.user_uuid !== userUuid) return false;
+
+  const enrichInstrument = async () => {
+    if (!input.paymentMethod && !input.paymentMethodDetail && !input.razorpayPaymentId) {
+      return;
+    }
+    const [fresh] = await db
+      .select({ metadata: BillingTransactions.metadata })
+      .from(BillingTransactions)
+      .where(eq(BillingTransactions.transaction_uuid, transactionUuid))
+      .limit(1);
+    await db
+      .update(BillingTransactions)
+      .set({
+        ...(input.razorpayPaymentId
+          ? { razorpay_payment_id: input.razorpayPaymentId }
+          : {}),
+        ...(input.paymentMethod
+          ? { payment_method: input.paymentMethod.slice(0, 32) }
+          : {}),
+        ...(input.paymentMethodDetail
+          ? {
+              metadata: {
+                ...((fresh?.metadata as Record<string, unknown>) || {}),
+                paymentMethodDetail: input.paymentMethodDetail,
+              },
+            }
+          : {}),
+        updated_at: new Date(),
+      })
+      .where(eq(BillingTransactions.transaction_uuid, transactionUuid));
+  };
+
+  if (transaction.status === "succeeded") {
+    await enrichInstrument();
+    return false;
+  }
 
   const planUuid = input.planUuid ?? transaction.plan_uuid;
   const [plan] = planUuid
@@ -43,6 +82,26 @@ export const grantPurchaseFromTransaction = async (input: GrantPurchaseInput) =>
   const topupCredits = input.creditsFromTopup ?? metadataCredits;
   if (!plan && topupCredits <= 0) return false;
 
+  const priorMeta = (transaction.metadata as Record<string, unknown>) || {};
+  const nextMetadata: Record<string, unknown> = {
+    ...priorMeta,
+    checkoutCompleted: true,
+    ...(input.paymentMethodDetail
+      ? {
+          paymentMethodDetail: {
+            ...input.paymentMethodDetail,
+            ...(typeof priorMeta.paymentProvider === "string"
+              ? { provider: priorMeta.paymentProvider }
+              : {}),
+          },
+          paymentProvider:
+            (input.paymentMethodDetail.provider as string | undefined) ||
+            priorMeta.paymentProvider,
+        }
+      : {}),
+  };
+
+  let claimedOk = false;
   await db.transaction(async (tx) => {
     const [claimed] = await tx
       .update(BillingTransactions)
@@ -54,10 +113,10 @@ export const grantPurchaseFromTransaction = async (input: GrantPurchaseInput) =>
         ...(input.razorpayPaymentId
           ? { razorpay_payment_id: input.razorpayPaymentId }
           : {}),
-        metadata: {
-          ...((transaction.metadata as Record<string, unknown>) || {}),
-          checkoutCompleted: true,
-        },
+        ...(input.paymentMethod
+          ? { payment_method: input.paymentMethod.slice(0, 32) }
+          : {}),
+        metadata: nextMetadata,
         updated_at: new Date(),
       })
       .where(
@@ -69,6 +128,7 @@ export const grantPurchaseFromTransaction = async (input: GrantPurchaseInput) =>
       .returning({ transaction_uuid: BillingTransactions.transaction_uuid });
 
     if (!claimed) return;
+    claimedOk = true;
 
     const credits = plan ? Number(plan.monthly_credits) : topupCredits;
     await tx
@@ -99,6 +159,7 @@ export const grantPurchaseFromTransaction = async (input: GrantPurchaseInput) =>
     }
   });
 
+  if (!claimedOk) await enrichInstrument();
   return true;
 };
 

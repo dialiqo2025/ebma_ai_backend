@@ -10,6 +10,7 @@ import {
   Users,
 } from "../../schema";
 import { ensureDefaultPaygSubscription, ensureWallet } from "./billing.provider";
+import { paymentProviderCapabilities } from "./payment-providers.config";
 import { GenResObj } from "../../utils/responseFormat.util";
 import { HttpStatusCodes as Code } from "../../utils/httpType.util";
 
@@ -453,12 +454,7 @@ export const getUserCapabilities = async (userUuid: string) => {
           llmCreditsPer1000Tokens: 1,
           creditToInr: 1,
         },
-    paymentProviders: {
-      stripeConfigured: Boolean(process.env.STRIPE_SECRET_KEY?.trim()),
-      razorpayConfigured: Boolean(
-        process.env.RAZORPAY_KEY_ID?.trim() && process.env.RAZORPAY_KEY_SECRET?.trim(),
-      ),
-    },
+    paymentProviders: paymentProviderCapabilities(),
   });
 };
 

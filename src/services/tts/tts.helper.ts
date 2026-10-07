@@ -1,9 +1,23 @@
 import path from "node:path";
-import { mkdir, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 
 const AUDIO_DIRECTORY = path.resolve(
   process.env.TTS_AUDIO_DIRECTORY ?? path.join(process.cwd(), "storage", "tts"),
 );
+
+const REFERENCE_DIRECTORY = path.resolve(
+  process.env.TTS_REFERENCE_DIRECTORY ??
+    path.join(process.cwd(), "storage", "tts-reference"),
+);
+
+const ALLOWED_REFERENCE_EXTENSIONS = new Set([
+  "wav",
+  "mp3",
+  "flac",
+  "ogg",
+  "webm",
+  "m4a",
+]);
 
 export const isTtsAutoProcessEnabled = () =>
   process.env.TTS_AUTO_PROCESS?.toLowerCase() === "true";
@@ -81,12 +95,64 @@ export const deleteTtsAudio = async (fileName: string | null) => {
   await rm(getTtsAudioPath(fileName), { force: true });
 };
 
+const extensionFromUpload = (file: Express.Multer.File) => {
+  const fromName = path.extname(file.originalname || "").slice(1).toLowerCase();
+  if (ALLOWED_REFERENCE_EXTENSIONS.has(fromName)) return fromName;
+
+  const mime = (file.mimetype || "").toLowerCase();
+  if (mime.includes("wav")) return "wav";
+  if (mime.includes("mpeg") || mime.includes("mp3")) return "mp3";
+  if (mime.includes("flac")) return "flac";
+  if (mime.includes("ogg")) return "ogg";
+  if (mime.includes("webm")) return "webm";
+  if (mime.includes("mp4") || mime.includes("m4a")) return "m4a";
+  return "wav";
+};
+
+export const isAllowedTtsReferenceSample = (file: Express.Multer.File) => {
+  const ext = extensionFromUpload(file);
+  return ALLOWED_REFERENCE_EXTENSIONS.has(ext);
+};
+
+export const saveTtsReferenceAudio = async (
+  generationUuid: string,
+  file: Express.Multer.File,
+) => {
+  await mkdir(REFERENCE_DIRECTORY, { recursive: true });
+
+  const ext = extensionFromUpload(file);
+  const fileName = `${generationUuid}.ref.${ext}`;
+  const destination = path.join(REFERENCE_DIRECTORY, fileName);
+  const temporary = path.join(REFERENCE_DIRECTORY, `${fileName}.tmp`);
+
+  await writeFile(temporary, file.buffer, { flag: "w" });
+  await rename(temporary, destination);
+  return fileName;
+};
+
+export const getTtsReferenceAudioPath = (fileName: string) => {
+  const safeFileName = path.basename(fileName);
+  return path.join(REFERENCE_DIRECTORY, safeFileName);
+};
+
+export const readTtsReferenceAudioBase64 = async (fileName: string) => {
+  const buffer = await readFile(getTtsReferenceAudioPath(fileName));
+  return buffer.toString("base64");
+};
+
+export const deleteTtsReferenceAudio = async (fileName: string | null) => {
+  if (!fileName) return;
+  await rm(getTtsReferenceAudioPath(fileName), { force: true });
+};
+
 export const serializeTtsGeneration = (generation: any) => ({
   generationUuid: generation.generation_uuid,
   text: generation.input_text,
   language: generation.language,
   voiceMode: generation.voice_mode,
   voiceId: generation.voice_id,
+  hasReferenceSample: Boolean(generation.reference_audio_file_name),
+  referenceText: generation.reference_text ?? null,
   emotion: generation.emotion ?? null,
   speed: generation.speed,
   pitch: generation.pitch,

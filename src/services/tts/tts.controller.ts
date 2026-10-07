@@ -25,6 +25,7 @@ export const TtsController = {
       const result = await TtsProvider.createTtsGeneration(
         userUuidFromRequest(req),
         payload,
+        req.file,
       );
       sendProviderResponse(res, result);
     } catch (error) {

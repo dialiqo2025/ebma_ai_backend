@@ -13,6 +13,10 @@ type TtsModelInput = {
   voiceId?: string;
   /** Applied as `<|emotion:NAME|>` prefix on `input` for the GPU model. */
   emotion?: string | null;
+  /** Clone reference audio (raw base64, no data-URL prefix) → GPU `reference.audio_base64`. */
+  referenceAudioBase64?: string;
+  /** Optional transcript of the reference clip → GPU `reference.text`. */
+  referenceText?: string;
   speed: number;
   pitch: number;
   outputFormat: "wav" | "mp3" | "ogg";
@@ -92,19 +96,28 @@ const buildModelHeaders = () => {
   return headers;
 };
 
-/** Payload for EBMA TTS `POST /tts/v1/audio/speech` (OpenAI-style speech API). */
-const buildSpeechRequestBody = (input: TtsModelInput, stream: boolean) => ({
-  input: applyEmotionPrefix(input.text, input.emotion),
-  stream,
-  temperature: floatFromEnvironment("TTS_MODEL_TEMPERATURE", DEFAULT_TEMPERATURE),
-  top_k: positiveIntegerFromEnvironment("TTS_MODEL_TOP_K", DEFAULT_TOP_K),
-  language: input.language,
-  voice_mode: input.voiceMode,
-  ...(input.voiceId ? { voice_id: input.voiceId } : {}),
-  speed: input.speed,
-  pitch: input.pitch,
-  output_format: input.outputFormat,
-});
+/**
+ * Payload for GPU `POST /tts/v1/audio/speech`.
+ * Clone curl shape:
+ * `{ input, stream, temperature, top_k, reference: { audio_base64, text } }`
+ */
+const buildSpeechRequestBody = (input: TtsModelInput, stream: boolean) => {
+  const body: Record<string, unknown> = {
+    input: applyEmotionPrefix(input.text, input.emotion),
+    stream,
+    temperature: floatFromEnvironment("TTS_MODEL_TEMPERATURE", DEFAULT_TEMPERATURE),
+    top_k: positiveIntegerFromEnvironment("TTS_MODEL_TOP_K", DEFAULT_TOP_K),
+  };
+
+  if (input.voiceMode === "clone" && input.referenceAudioBase64) {
+    body.reference = {
+      audio_base64: input.referenceAudioBase64,
+      text: input.referenceText ?? "",
+    };
+  }
+
+  return body;
+};
 
 const parseUpstreamError = async (response: Response) => {
   const responseText = (await response.text()).slice(0, 500);

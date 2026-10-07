@@ -8,10 +8,14 @@ import { prepareTextForTts } from "../llm/llm.provider";
 import {
   audioMimeTypeByFormat,
   deleteTtsAudio,
+  deleteTtsReferenceAudio,
   getTtsAudioPath,
+  isAllowedTtsReferenceSample,
   isTtsAutoProcessEnabled,
   isTtsModelConfigured,
+  readTtsReferenceAudioBase64,
   saveTtsAudio,
+  saveTtsReferenceAudio,
   serializeTtsGeneration,
   wrapPcmS16leAsWav,
 } from "./tts.helper";
@@ -22,6 +26,7 @@ import {
   type TtsModelStream,
 } from "./tts.model";
 import { TTS_EMOTION_OPTIONS, TTS_STYLE_TAG_GROUPS } from "./tts.emotion";
+import { ttsCloneSampleMaxBytes } from "./tts.upload";
 import { recordUsage } from "../billing/billing.provider";
 import type {
   CreateTtsGeneration,
@@ -44,10 +49,89 @@ const findOwnedGeneration = async (generationUuid: string, userUuid: string) => 
   return generation;
 };
 
+/** Load clone reference for GPU `reference: { audio_base64, text }`. */
+const resolveCloneReferenceForModel = async (generation: {
+  voice_mode: string;
+  reference_audio_file_name: string | null;
+  reference_text: string | null;
+}) => {
+  if (generation.voice_mode !== "clone") return {};
+
+  if (!generation.reference_audio_file_name) {
+    throw new TtsModelError(
+      "Voice clone requires a reference audio sample",
+      "clone_sample_required",
+      422,
+    );
+  }
+
+  try {
+    const audioBase64 = await readTtsReferenceAudioBase64(
+      generation.reference_audio_file_name,
+    );
+    return {
+      referenceAudioBase64: audioBase64,
+      referenceText: generation.reference_text ?? "",
+    };
+  } catch {
+    throw new TtsModelError(
+      "Clone reference audio sample was not found",
+      "clone_sample_missing",
+      422,
+    );
+  }
+};
+
+const clearCloneReferenceAfterUse = async (
+  generationUuid: string,
+  userUuid: string,
+  referenceFileName: string | null,
+) => {
+  if (!referenceFileName) return;
+  await deleteTtsReferenceAudio(referenceFileName);
+  await db
+    .update(TtsGenerations)
+    .set({
+      reference_audio_file_name: null,
+      updated_at: new Date(),
+    })
+    .where(
+      and(
+        eq(TtsGenerations.generation_uuid, generationUuid),
+        eq(TtsGenerations.user_uuid, userUuid),
+      ),
+    );
+};
+
 export const createTtsGeneration = async (
   userUuid: string,
   payload: CreateTtsGeneration,
+  voiceSample?: Express.Multer.File,
 ) => {
+  if (payload.voiceMode === "clone") {
+    if (!voiceSample?.buffer?.length) {
+      return GenResObj(
+        Code.BAD_REQUEST,
+        false,
+        "voiceSample file is required when voiceMode is clone",
+      );
+    }
+    if (!isAllowedTtsReferenceSample(voiceSample)) {
+      return GenResObj(
+        Code.UNSUPPORTED_MEDIA_TYPE,
+        false,
+        "Voice sample must be WAV, MP3, FLAC, or OGG",
+      );
+    }
+    if (voiceSample.size > ttsCloneSampleMaxBytes()) {
+      return GenResObj(
+        Code.REQUEST_TOO_LONG,
+        false,
+        "Voice sample exceeds the configured size limit",
+      );
+    }
+  }
+
   const [generation] = await db
     .insert(TtsGenerations)
     .values({
@@ -55,7 +139,9 @@ export const createTtsGeneration = async (
       input_text: payload.text,
       language: payload.language,
       voice_mode: payload.voiceMode,
-      voice_id: payload.voiceId ?? null,
+      voice_id: payload.voiceMode === "clone" ? (payload.voiceId ?? null) : null,
+      reference_text:
+        payload.voiceMode === "clone" ? (payload.sampleTranscript ?? "") : null,
       emotion: payload.emotion ?? null,
       speed: payload.speed,
       pitch: payload.pitch,
@@ -64,6 +150,33 @@ export const createTtsGeneration = async (
     .returning();
 
   if (!generation) throw new Error("TTS generation creation failed");
+
+  let referenceFileName: string | null = null;
+  try {
+    if (payload.voiceMode === "clone" && voiceSample) {
+      referenceFileName = await saveTtsReferenceAudio(
+        generation.generation_uuid,
+        voiceSample,
+      );
+      const [withReference] = await db
+        .update(TtsGenerations)
+        .set({
+          reference_audio_file_name: referenceFileName,
+          updated_at: new Date(),
+        })
+        .where(eq(TtsGenerations.generation_uuid, generation.generation_uuid))
+        .returning();
+
+      if (!withReference) throw new Error("TTS reference sample save failed");
+      Object.assign(generation, withReference);
+    }
+  } catch (error) {
+    await db
+      .delete(TtsGenerations)
+      .where(eq(TtsGenerations.generation_uuid, generation.generation_uuid));
+    if (referenceFileName) await deleteTtsReferenceAudio(referenceFileName);
+    throw error;
+  }
 
   if (!isTtsAutoProcessEnabled()) {
     return GenResObj(
@@ -165,12 +278,19 @@ export const updateTtsGeneration = async (
         ? existing.voice_id
         : payload.voiceId;
 
-  if (resultingVoiceMode === "clone" && !resultingVoiceId) {
+  if (
+    resultingVoiceMode === "clone" &&
+    !existing.reference_audio_file_name
+  ) {
     return GenResObj(
       Code.UNPROCESSABLE_ENTITY,
       false,
-      "voiceId is required when voiceMode is clone",
+      "Clone generations need a voice sample upload; create a new clone request",
     );
+  }
+
+  if (resultingVoiceMode === "default" && existing.reference_audio_file_name) {
+    await deleteTtsReferenceAudio(existing.reference_audio_file_name);
   }
 
   const [updated] = await db
@@ -181,6 +301,12 @@ export const updateTtsGeneration = async (
       ...(payload.voiceMode !== undefined ? { voice_mode: payload.voiceMode } : {}),
       ...(payload.voiceMode !== undefined || payload.voiceId !== undefined
         ? { voice_id: resultingVoiceId }
+        : {}),
+      ...(payload.sampleTranscript !== undefined
+        ? { reference_text: payload.sampleTranscript }
+        : {}),
+      ...(resultingVoiceMode === "default"
+        ? { reference_audio_file_name: null, reference_text: null }
         : {}),
       ...(payload.emotion !== undefined ? { emotion: payload.emotion } : {}),
       ...(payload.speed !== undefined ? { speed: payload.speed } : {}),
@@ -233,6 +359,7 @@ export const deleteTtsGeneration = async (generationUuid: string, userUuid: stri
 
   if (!deleted) throw new Error("TTS generation deletion failed");
   await deleteTtsAudio(deleted.audio_file_name);
+  await deleteTtsReferenceAudio(deleted.reference_audio_file_name);
 
   return GenResObj(
     Code.OK,
@@ -300,12 +427,15 @@ export const generateTtsAudio = async (generationUuid: string, userUuid: string)
           })).data?.data?.text
         : claimed.input_text;
 
+    const cloneReference = await resolveCloneReferenceForModel(claimed);
+
     const output = await synthesizeWithTtsModel({
       text: typeof llmText === "string" ? llmText : claimed.input_text,
       language: claimed.language,
       voiceMode: claimed.voice_mode,
       ...(claimed.voice_id ? { voiceId: claimed.voice_id } : {}),
       emotion: claimed.emotion,
+      ...cloneReference,
       speed: claimed.speed,
       pitch: claimed.pitch,
       outputFormat: claimed.audio_format,
@@ -340,6 +470,12 @@ export const generateTtsAudio = async (generationUuid: string, userUuid: string)
 
     if (!completed) throw new Error("TTS generation completion update failed");
 
+    await clearCloneReferenceAfterUse(
+      generationUuid,
+      userUuid,
+      claimed.reference_audio_file_name,
+    );
+
     void recordUsage({
       userUuid,
       type: "tts_characters",
@@ -349,11 +485,17 @@ export const generateTtsAudio = async (generationUuid: string, userUuid: string)
       metadata: { generationUuid: claimed.generation_uuid, language: claimed.language },
     });
 
+    const [finalRow] = await db
+      .select()
+      .from(TtsGenerations)
+      .where(eq(TtsGenerations.generation_uuid, generationUuid))
+      .limit(1);
+
     return GenResObj(
       Code.OK,
       true,
       "Speech generated successfully",
-      serializeTtsGeneration(completed),
+      serializeTtsGeneration(finalRow ?? completed),
     );
   } catch (error) {
     if (savedFileName) await deleteTtsAudio(savedFileName);
@@ -531,12 +673,15 @@ export const prepareTtsStream = async (
 
   try {
     // Skip LLM polish on the stream path so first audio byte arrives ASAP.
+    const cloneReference = await resolveCloneReferenceForModel(claimed);
+
     const stream = await openTtsModelStream({
       text: claimed.input_text,
       language: claimed.language,
       voiceMode: claimed.voice_mode,
       ...(claimed.voice_id ? { voiceId: claimed.voice_id } : {}),
       emotion: claimed.emotion,
+      ...cloneReference,
       speed: claimed.speed,
       pitch: claimed.pitch,
       outputFormat: claimed.audio_format,
@@ -584,6 +729,12 @@ export const prepareTtsStream = async (
             ),
           );
 
+        await clearCloneReferenceAfterUse(
+          generationUuid,
+          userUuid,
+          claimed.reference_audio_file_name,
+        );
+
         void recordUsage({
           userUuid,
           type: "tts_characters",
@@ -614,6 +765,15 @@ export const getTtsOptions = () =>
     pitch: { min: 0.5, max: 1.5, step: 0.1, default: 1 },
     autoProcess: isTtsAutoProcessEnabled(),
     modelConfigured: isTtsModelConfigured(),
+    voiceClone: {
+      enabled: isTtsModelConfigured(),
+      sampleFormats: ["wav", "mp3", "flac", "ogg"],
+      sampleMinDurationSeconds: 5,
+      sampleMaxDurationSeconds: 15,
+      sampleMaxBytes: ttsCloneSampleMaxBytes(),
+      sampleTranscriptMaxCharacters: 2000,
+      requiresSampleTranscript: false,
+    },
     streaming: {
       enabled: isTtsModelConfigured(),
       endpoint: "POST /tts/generations/:generation_uuid/stream",

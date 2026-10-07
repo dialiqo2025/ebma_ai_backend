@@ -15,6 +15,13 @@ const emotionField = z.preprocess((value) => {
   return value;
 }, z.enum(TTS_EMOTIONS).nullable().optional());
 
+const sampleTranscriptField = z.preprocess((value) => {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "string") return value;
+  const trimmed = value.trim();
+  return trimmed.length ? trimmed : "";
+}, z.string().max(2000, "Sample transcript must be at most 2000 characters").optional());
+
 const ttsFields = {
   text: z
     .string()
@@ -23,43 +30,31 @@ const ttsFields = {
     .max(1500, "Text must be at most 1500 characters"),
   language: languageValidator.default("auto"),
   voiceMode: z.enum(["default", "clone"]).default("default"),
+  /** Legacy optional id; clone now uses uploaded `voiceSample` → GPU `reference`. */
   voiceId: z.string().trim().min(1).max(255).optional(),
+  sampleTranscript: sampleTranscriptField,
   emotion: emotionField,
   speed: z.coerce.number().min(0.5).max(1.5).default(1),
   pitch: z.coerce.number().min(0.5).max(1.5).default(1),
   outputFormat: z.enum(["wav", "mp3", "ogg"]).default("wav"),
 };
 
-const requireCloneVoice = <T extends z.ZodTypeAny>(schema: T) =>
-  schema.superRefine((value: any, context) => {
-    if (value.voiceMode === "clone" && !value.voiceId) {
-      context.addIssue({
-        code: "custom",
-        path: ["voiceId"],
-        message: "voiceId is required when voiceMode is clone",
-      });
-    }
-  });
+export const createTtsGenerationValidator = z.object(ttsFields).strict();
 
-export const createTtsGenerationValidator = requireCloneVoice(
-  z.object(ttsFields).strict(),
-);
-
-export const updateTtsGenerationValidator = requireCloneVoice(
-  z
-    .object({
-      text: ttsFields.text.optional(),
-      language: languageValidator.optional(),
-      voiceMode: z.enum(["default", "clone"]).optional(),
-      voiceId: z.string().trim().min(1).max(255).nullable().optional(),
-      emotion: emotionField,
-      speed: z.coerce.number().min(0.5).max(1.5).optional(),
-      pitch: z.coerce.number().min(0.5).max(1.5).optional(),
-      outputFormat: z.enum(["wav", "mp3", "ogg"]).optional(),
-    })
-    .strict()
-    .refine((payload) => Object.keys(payload).length > 0, "At least one field is required"),
-);
+export const updateTtsGenerationValidator = z
+  .object({
+    text: ttsFields.text.optional(),
+    language: languageValidator.optional(),
+    voiceMode: z.enum(["default", "clone"]).optional(),
+    voiceId: z.string().trim().min(1).max(255).nullable().optional(),
+    sampleTranscript: sampleTranscriptField,
+    emotion: emotionField,
+    speed: z.coerce.number().min(0.5).max(1.5).optional(),
+    pitch: z.coerce.number().min(0.5).max(1.5).optional(),
+    outputFormat: z.enum(["wav", "mp3", "ogg"]).optional(),
+  })
+  .strict()
+  .refine((payload) => Object.keys(payload).length > 0, "At least one field is required");
 
 export const ttsGenerationUuidValidator = z.string().uuid("Invalid generation UUID");
 

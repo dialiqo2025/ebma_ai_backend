@@ -83,8 +83,8 @@ export const createCheckoutSession = async (userUuid: string, planUuid: string) 
     managed_payments: { enabled: false },
     customer_email: user?.email || undefined,
     line_items: [lineItem],
-    success_url: `${appUrl()}/platform/plans?checkout=success&session_id={CHECKOUT_SESSION_ID}`,
-    cancel_url: `${appUrl()}/platform/plans?checkout=cancelled`,
+    success_url: `${appUrl()}/platform/billing?checkout=success&session_id={CHECKOUT_SESSION_ID}`,
+    cancel_url: `${appUrl()}/platform/billing?checkout=cancelled`,
     metadata: {
       userUuid,
       planUuid: plan.plan_uuid,
@@ -152,8 +152,8 @@ export const createWalletTopupCheckout = async (userUuid: string, amount: number
         quantity: 1,
       },
     ],
-    success_url: `${appUrl()}/platform/plans?checkout=success&session_id={CHECKOUT_SESSION_ID}`,
-    cancel_url: `${appUrl()}/platform/plans?kind=wallet_topup&checkout=cancelled`,
+    success_url: `${appUrl()}/platform/billing?checkout=success&session_id={CHECKOUT_SESSION_ID}`,
+    cancel_url: `${appUrl()}/platform/billing?checkout=cancelled`,
     metadata: {
       userUuid,
       transactionUuid: transaction.transaction_uuid,

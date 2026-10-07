@@ -39,17 +39,20 @@ const createPaymentLink = async (input: {
   cancelPath?: string;
 }) => {
   const client = razorpay();
+  // Return to Billing so the client can confirm + credit the wallet immediately.
+  const billingSuccessBase = `${appUrl()}/platform/billing?checkout=success`;
+
   const link = await client.paymentLink.create({
     amount: input.amountMinor,
     currency: input.currencyCode,
     accept_partial: false,
     description: input.description,
     customer: input.email ? { email: input.email } : undefined,
-    notify: { email: Boolean(input.email), sms: false },
+    // Disable Razorpay's "confirm payment" emails; wallet is credited via callback/webhook.
+    notify: { email: false, sms: false },
     reminder_enable: false,
-    // Razorpay appends razorpay_payment_link_id on redirect; we also pass a placeholder
-    // session_id that we rewrite once the link id is known.
-    callback_url: `${appUrl()}/platform/plans?checkout=success`,
+    // Razorpay also appends razorpay_payment_link_id on redirect.
+    callback_url: billingSuccessBase,
     callback_method: "get",
     notes: input.notes,
     options: {
@@ -70,7 +73,7 @@ const createPaymentLink = async (input: {
 
   try {
     await client.paymentLink.edit(linkId, {
-      callback_url: `${appUrl()}/platform/plans?checkout=success&session_id=${encodeURIComponent(linkId)}`,
+      callback_url: `${billingSuccessBase}&session_id=${encodeURIComponent(linkId)}`,
       callback_method: "get",
     } as any);
   } catch {
@@ -233,7 +236,26 @@ const grantFromNotes = async (
 export const confirmRazorpayCheckout = async (userUuid: string, paymentLinkId: string) => {
   const client = razorpay();
   const link = (await client.paymentLink.fetch(paymentLinkId)) as any;
-  const notes = notesFrom(link?.notes);
+  let notes = notesFrom(link?.notes);
+
+  // Fallback: resolve pending transaction by payment link id if notes are missing/malformed.
+  if (!notes) {
+    const [tx] = await db
+      .select()
+      .from(BillingTransactions)
+      .where(eq(BillingTransactions.razorpay_payment_link_id, paymentLinkId))
+      .limit(1);
+    if (tx && tx.user_uuid === userUuid) {
+      const meta = (tx.metadata as Record<string, unknown> | null) || {};
+      notes = {
+        userUuid: tx.user_uuid,
+        transactionUuid: tx.transaction_uuid,
+        ...(typeof meta.planKind === "string" ? { planKind: meta.planKind } : {}),
+        ...(meta.credits !== undefined ? { credits: String(meta.credits) } : {}),
+      };
+    }
+  }
+
   if (!notes || notes.userUuid !== userUuid) {
     throw new Error("Checkout session does not belong to this user");
   }
@@ -255,8 +277,9 @@ export const confirmRazorpayCheckout = async (userUuid: string, paymentLinkId: s
       .where(eq(BillingTransactions.transaction_uuid, notes.transactionUuid));
   }
 
-  const credited = await grantFromNotes(notes, paymentId ? String(paymentId) : null);
-  return { status: "paid", credited: Boolean(credited) || true };
+  const creditedNow = await grantFromNotes(notes, paymentId ? String(paymentId) : null);
+  // grant returns false if already credited earlier (webhook); treat paid links as credited.
+  return { status: "paid", credited: Boolean(creditedNow) || true };
 };
 
 export const handleRazorpayWebhook = async (

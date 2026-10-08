@@ -17,6 +17,8 @@ const apiKeyScopeFor = (req: Request): ApiKeyScope | null => {
   if (service === "translate") return "translate";
   if (service === "chat") return "llm";
   if (service === "llm" && req.path === "/process") return "llm";
+  // Call centers read bots and call transcripts; connection credentials stay JWT-only.
+  if (service === "voice-bots" && !req.path.startsWith("/connections")) return "voice";
   return null;
 };
 

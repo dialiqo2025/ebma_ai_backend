@@ -7,11 +7,15 @@ import { connectDB } from "./config/database/connection.database";
 import router from "./services/route";
 import { ZodError } from "zod";
 import { BillingController } from "./services/billing/billing.controller";
+import { attachVoiceRuntime } from "./services/voice-runtime/runtime.server";
 
 const app = express();
 const server = http.createServer(app);
 
 const port = Number(process.env.PORT ?? 5002);
+
+// Real-time voice bot WebSocket endpoints (/voice/v1/stream, /voice/v1/test).
+attachVoiceRuntime(server);
 
 app.use("/api/v1/billing/webhook", express.raw({ type: "application/json" }));
 app.post("/api/v1/billing/webhook", (req, res) => void BillingController.webhook(req, res));

@@ -269,3 +269,111 @@ export const transformWithLlm = async (input: LlmRequestInput, settings?: UserLl
       : {}),
   };
 };
+
+export type LlmStreamOptions = {
+  /** Called with each text delta as the model produces it. */
+  onText: (delta: string) => void;
+  signal?: AbortSignal;
+};
+
+/** Yield the `data:` payloads of a server-sent-events response body. */
+async function* readSseData(body: ReadableStream<Uint8Array>) {
+  const decoder = new TextDecoder();
+  let buffer = "";
+  for await (const chunk of body as unknown as AsyncIterable<Uint8Array>) {
+    buffer += decoder.decode(chunk, { stream: true });
+    let newline: number;
+    while ((newline = buffer.indexOf("\n")) >= 0) {
+      const line = buffer.slice(0, newline).replace(/\r$/, "");
+      buffer = buffer.slice(newline + 1);
+      if (line.startsWith("data:")) yield line.slice(5).trim();
+    }
+  }
+  if (buffer.startsWith("data:")) yield buffer.slice(5).trim();
+}
+
+/**
+ * Streaming variant of requestLlmCompletion for real-time voice. Supports the same
+ * three provider families: OpenAI-compatible chat completions, Gemini and Claude.
+ */
+export const streamLlmCompletion = async (
+  input: LlmCompletionInput,
+  settings: UserLlmSettings | undefined,
+  options: LlmStreamOptions,
+): Promise<LlmCompletionOutput> => {
+  const endpoint = settings?.endpoint?.trim() || process.env.LLM_MODEL_ENDPOINT?.trim() || "";
+  const modelName = settings?.model_name?.trim() || process.env.LLM_MODEL?.trim() || "gpt-4o-mini";
+  const provider = settings?.provider?.toLowerCase();
+  const isGemini = provider === "gemini" || endpoint.includes("generativelanguage.googleapis.com") || modelName.startsWith("gemini-");
+  const isClaude = provider === "claude" || endpoint.includes("anthropic.com") || modelName.startsWith("claude-");
+  const apiKey = settings?.api_key?.trim() || process.env.LLM_API_KEY?.trim();
+
+  let resolvedEndpoint = settings?.endpoint?.trim() || (isGemini
+    ? `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:streamGenerateContent`
+    : isClaude ? "https://api.anthropic.com/v1/messages" : endpoint);
+  if (!resolvedEndpoint) throw new LlmModelError("LLM model endpoint is not configured", "model_not_configured", 503);
+  if (isGemini) {
+    resolvedEndpoint = resolvedEndpoint.replace(":generateContent", ":streamGenerateContent");
+    const params = new URLSearchParams();
+    if (!resolvedEndpoint.includes("alt=sse")) params.set("alt", "sse");
+    if (apiKey && !resolvedEndpoint.includes("key=")) params.set("key", apiKey);
+    const query = params.toString();
+    if (query) resolvedEndpoint = `${resolvedEndpoint}${resolvedEndpoint.includes("?") ? "&" : "?"}${query}`;
+  }
+
+  const body = isGemini
+    ? buildGeminiBody(input, settings)
+    : isClaude
+      ? { ...buildClaudeBody(input, settings), model: settings?.model_name || modelName, stream: true }
+      : { ...buildChatCompletionsBody(input, modelName, settings), stream: true };
+
+  const timeout = AbortSignal.timeout(Number(settings?.timeout_ms ?? process.env.LLM_TIMEOUT_MS ?? 30_000));
+  let response: Response;
+  try {
+    response = await fetch(resolvedEndpoint, {
+      method: "POST",
+      headers: isClaude
+        ? { "Content-Type": "application/json", Accept: "text/event-stream", "x-api-key": apiKey || "", "anthropic-version": "2023-06-01" }
+        : { ...buildModelHeaders(apiKey), Accept: "text/event-stream" },
+      body: JSON.stringify(body),
+      signal: options.signal ? AbortSignal.any([options.signal, timeout]) : timeout,
+    });
+  } catch (error) {
+    if (options.signal?.aborted) throw error;
+    const timedOut = error instanceof Error && error.name === "TimeoutError";
+    throw new LlmModelError(
+      timedOut ? "The LLM request timed out" : "The LLM model is unavailable",
+      timedOut ? "model_timeout" : "model_unavailable",
+      timedOut ? 504 : 503,
+    );
+  }
+
+  if (!response.ok || !response.body) {
+    const responseText = (await response.text()).slice(0, 500);
+    console.error("LLM stream request failed", response.status, responseText);
+    throw new LlmModelError("The LLM model could not process the request", "model_request_failed", response.status === 429 ? 429 : 502);
+  }
+
+  let fullText = "";
+  for await (const data of readSseData(response.body)) {
+    if (!data || data === "[DONE]") continue;
+    let event: any;
+    try {
+      event = JSON.parse(data);
+    } catch {
+      continue;
+    }
+    const delta: unknown = isGemini
+      ? event?.candidates?.[0]?.content?.parts?.map((part: any) => part?.text ?? "").join("")
+      : isClaude
+        ? event?.type === "content_block_delta" ? event?.delta?.text : undefined
+        : event?.choices?.[0]?.delta?.content;
+    if (typeof delta === "string" && delta) {
+      fullText += delta;
+      options.onText(delta);
+    }
+  }
+
+  const providerRequestId = response.headers.get("x-request-id") ?? response.headers.get("request-id") ?? undefined;
+  return { rawText: fullText, ...(providerRequestId ? { providerRequestId } : {}) };
+};

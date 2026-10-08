@@ -1,7 +1,7 @@
 import { index, jsonb, pgTable, timestamp, uuid, varchar } from "drizzle-orm/pg-core";
 import { Users } from "./user.schema";
 
-export type ApiKeyScope = "stt" | "tts" | "llm" | "translate";
+export type ApiKeyScope = "stt" | "tts" | "llm" | "voice" | "translate";
 
 export const ApiKeys = pgTable("api_keys", {
   key_uuid: uuid("key_uuid").defaultRandom().primaryKey(),

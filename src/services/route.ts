@@ -10,6 +10,7 @@ import Chat from "./chat/chat.route";
 import Billing from "./billing/billing.route";
 import ApiKey from "./apikey/apikey.route";
 import Translate from "./translate/translate.route";
+import VoiceBot from "./voice-bot/voice-bot.route";
 
 const router = Router();
 
@@ -23,5 +24,6 @@ router.use("/chat", Chat);
 router.use("/billing", Billing);
 router.use("/api-keys", ApiKey);
 router.use("/translate", Translate);
+router.use("/voice-bots", VoiceBot);
 
 export default router;

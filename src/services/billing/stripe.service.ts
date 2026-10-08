@@ -216,7 +216,12 @@ const instrumentFromStripeSession = async (session: Stripe.Checkout.Session) => 
         paymentMethod = String(pmd.type).slice(0, 32);
         detail.method = paymentMethod;
       }
-      if (pmd?.type === "upi" && pmd.upi?.vpa) detail.vpa = pmd.upi.vpa;
+      // UPI isn't in the installed Stripe SDK types yet; read it defensively.
+      const upiVpa =
+        pmd?.type === "upi"
+          ? (pmd as { upi?: { vpa?: string | null } }).upi?.vpa
+          : undefined;
+      if (upiVpa) detail.vpa = upiVpa;
       if (pmd?.type === "card" && pmd.card) {
         if (pmd.card.brand) detail.network = pmd.card.brand;
         if (pmd.card.last4) detail.last4 = pmd.card.last4;

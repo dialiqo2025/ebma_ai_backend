@@ -72,64 +72,65 @@ export const TTS_STYLE_TAG_GROUPS: TtsStyleTagGroup[] = [
       kind: "style" as const,
     })),
   },
-  {
-    id: "speed-pitch",
-    label: "SPEED AND PITCH",
-    tags: (
-      [
-        ["speed-very-slow", "speed very slow", "<|speed:very_slow|>"],
-        ["speed-slow", "speed slow", "<|speed:slow|>"],
-        ["speed-fast", "speed fast", "<|speed:fast|>"],
-        ["speed-very-fast", "speed very fast", "<|speed:very_fast|>"],
-        ["pitch-low", "pitch low", "<|pitch:low|>"],
-        ["pitch-high", "pitch high", "<|pitch:high|>"],
-        ["expressive-high", "expressive high", "<|expressive:high|>"],
-        ["expressive-low", "expressive low", "<|expressive:low|>"],
-      ] as const
-    ).map(([id, label, token]) => ({
-      id,
-      label,
-      token,
-      kind: "speed" as const,
-    })),
-  },
-  {
-    id: "pauses",
-    label: "PAUSES",
-    tags: (
-      [
-        ["pause", "pause", "<|pause|>"],
-        ["long-pause", "long pause", "<|long_pause|>"],
-      ] as const
-    ).map(([id, label, token]) => ({
-      id,
-      label,
-      token,
-      kind: "pause" as const,
-    })),
-  },
-  {
-    id: "sfx",
-    label: "SOUND EFFECTS",
-    tags: (
-      [
-        "cough",
-        "laughter",
-        "crying",
-        "screaming",
-        "burping",
-        "humming",
-        "sigh",
-        "sniff",
-        "sneeze",
-      ] as const
-    ).map((name) => ({
-      id: `sfx-${name}`,
-      label: name,
-      token: `<|${name}|>`,
-      kind: "sfx" as const,
-    })),
-  },
+  // Hidden for now — keep catalog commented for later re-enable.
+  // {
+  //   id: "speed-pitch",
+  //   label: "SPEED AND PITCH",
+  //   tags: (
+  //     [
+  //       ["speed-very-slow", "speed very slow", "<|speed:very_slow|>"],
+  //       ["speed-slow", "speed slow", "<|speed:slow|>"],
+  //       ["speed-fast", "speed fast", "<|speed:fast|>"],
+  //       ["speed-very-fast", "speed very fast", "<|speed:very_fast|>"],
+  //       ["pitch-low", "pitch low", "<|pitch:low|>"],
+  //       ["pitch-high", "pitch high", "<|pitch:high|>"],
+  //       ["expressive-high", "expressive high", "<|expressive:high|>"],
+  //       ["expressive-low", "expressive low", "<|expressive:low|>"],
+  //     ] as const
+  //   ).map(([id, label, token]) => ({
+  //     id,
+  //     label,
+  //     token,
+  //     kind: "speed" as const,
+  //   })),
+  // },
+  // {
+  //   id: "pauses",
+  //   label: "PAUSES",
+  //   tags: (
+  //     [
+  //       ["pause", "pause", "<|pause|>"],
+  //       ["long-pause", "long pause", "<|long_pause|>"],
+  //     ] as const
+  //   ).map(([id, label, token]) => ({
+  //     id,
+  //     label,
+  //     token,
+  //     kind: "pause" as const,
+  //   })),
+  // },
+  // {
+  //   id: "sfx",
+  //   label: "SOUND EFFECTS",
+  //   tags: (
+  //     [
+  //       "cough",
+  //       "laughter",
+  //       "crying",
+  //       "screaming",
+  //       "burping",
+  //       "humming",
+  //       "sigh",
+  //       "sniff",
+  //       "sneeze",
+  //     ] as const
+  //   ).map((name) => ({
+  //     id: `sfx-${name}`,
+  //     label: name,
+  //     token: `<|${name}|>`,
+  //     kind: "sfx" as const,
+  //   })),
+  // },
 ];
 
 export const TTS_EMOTION_OPTIONS: { value: TtsEmotion; label: string }[] =

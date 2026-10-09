@@ -10,6 +10,7 @@ import Chat from "./chat/chat.route";
 import Billing from "./billing/billing.route";
 import ApiKey from "./apikey/apikey.route";
 import Translate from "./translate/translate.route";
+import Playground from "./playground/playground.route";
 
 const router = Router();
 
@@ -23,5 +24,7 @@ router.use("/chat", Chat);
 router.use("/billing", Billing);
 router.use("/api-keys", ApiKey);
 router.use("/translate", Translate);
+// Public website playground (IP-limited; GPU stays behind this API)
+router.use("/playground", Playground);
 
 export default router;

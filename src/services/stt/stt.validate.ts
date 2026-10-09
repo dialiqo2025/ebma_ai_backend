@@ -40,7 +40,7 @@ const sessionFields = {
   language: languageValidator.default("hi"),
   mode: outputModeValidator.default("native"),
   sampleRate: z.number().int().min(8000).max(96000).default(16000),
-  endSilenceMs: z.number().int().min(250).max(3000).default(700),
+  endSilenceMs: z.number().int().min(250).max(3000).default(400),
   partials: z.boolean().default(true),
 };
 

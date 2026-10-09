@@ -591,7 +591,7 @@ export const getSttOptions = () =>
     languages: STT_LANGUAGES,
     modes: ["native", "mixed", "romanized"],
     sampleRate: { min: 8000, max: 96000, default: 16000 },
-    endSilenceMs: { min: 250, max: 3000, default: 700 },
+    endSilenceMs: { min: 250, max: 3000, default: 400 },
     partialsDefault: true,
     maxSessionMinutes: 20,
     maxPhraseSeconds: 25,

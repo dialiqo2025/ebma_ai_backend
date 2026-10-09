@@ -19,9 +19,42 @@ app.use("/api/v1/billing/webhook/razorpay", express.raw({ type: "application/jso
 app.post("/api/v1/billing/webhook/razorpay", (req, res) =>
   void BillingController.razorpayWebhook(req, res),
 );
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-app.use(cors());
+// Needed so req.ip / X-Forwarded-For resolve correctly behind proxies.
+app.set("trust proxy", 1);
+
+app.use(express.json({ limit: "256kb" }));
+app.use(express.urlencoded({ extended: true, limit: "256kb" }));
+
+const corsOrigins = [
+  process.env.CORS_ORIGINS,
+  process.env.SITE_URL,
+  process.env.PORTAL_URL,
+  process.env.NEXT_PUBLIC_SITE_URL,
+  process.env.NEXT_PUBLIC_PORTAL_URL,
+  "http://localhost:3000",
+  "http://localhost:3001",
+  "http://127.0.0.1:3000",
+  "http://127.0.0.1:3001",
+]
+  .filter(Boolean)
+  .join(",")
+  .split(",")
+  .map((value) => value.trim().replace(/\/$/, ""))
+  .filter(Boolean);
+
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      // Allow non-browser tools (no Origin) and allowlisted marketing/portal origins.
+      if (!origin || corsOrigins.includes(origin.replace(/\/$/, ""))) {
+        callback(null, true);
+        return;
+      }
+      callback(null, false);
+    },
+    credentials: true,
+  }),
+);
 
 app.get("/api/v1/health", (_req, res) => {
   return res.status(200).json({

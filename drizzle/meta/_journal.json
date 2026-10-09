@@ -183,6 +183,13 @@
       "when": 1791434271537,
       "tag": "0025_wooden_zeigeist",
       "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1791800000000,
+      "tag": "0026_playground_trials",
+      "breakpoints": true
     }
   ]
 }

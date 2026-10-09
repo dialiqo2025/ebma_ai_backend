@@ -1,15 +1,17 @@
-import { and, desc, eq, sql } from "drizzle-orm";
+import { and, desc, eq, gte, lte, sql } from "drizzle-orm";
 import { db } from "../../config/database/connection.database";
 import {
   BillingPlans,
   BillingRates,
+  BillingSettings,
   BillingSubscriptions,
   BillingTransactions,
+  BillingUsageLedger,
   BillingWallets,
   EnterprisePlanRequests,
   Users,
 } from "../../schema";
-import { ensureDefaultPaygSubscription, ensureWallet } from "./billing.provider";
+import { ensureDefaultPaygSubscription, ensureWallet, getSignupFreeCredits } from "./billing.provider";
 import { paymentProviderCapabilities } from "./payment-providers.config";
 import { GenResObj } from "../../utils/responseFormat.util";
 import { HttpStatusCodes as Code } from "../../utils/httpType.util";
@@ -219,6 +221,25 @@ export const updateRates = async (input: Partial<typeof defaultRates>) => {
   return listRates();
 };
 
+export const getSignupFreeCreditSetting = async () => {
+  const credits = await getSignupFreeCredits();
+  return GenResObj(Code.OK, true, "Signup credit setting fetched successfully", { credits });
+};
+
+export const updateSignupFreeCreditSetting = async (credits: number) => {
+  if (!Number.isFinite(credits) || credits < 0 || credits > 1_000_000_000) {
+    return GenResObj(Code.BAD_REQUEST, false, "Credits must be between 0 and 1,000,000,000");
+  }
+  await db
+    .insert(BillingSettings)
+    .values({ setting_id: 1, signup_free_credits: credits.toFixed(6), updated_at: new Date() })
+    .onConflictDoUpdate({
+      target: BillingSettings.setting_id,
+      set: { signup_free_credits: credits.toFixed(6), updated_at: new Date() },
+    });
+  return GenResObj(Code.OK, true, "Signup free credits updated successfully", { credits });
+};
+
 export const listSubscriptions = async () =>
   GenResObj(
     Code.OK,
@@ -234,6 +255,92 @@ export const listTransactions = async () =>
     "Transactions fetched successfully",
     await db.select().from(BillingTransactions).orderBy(desc(BillingTransactions.created_at)),
   );
+
+export const getAdminUsageOverview = async (from: Date, to: Date) => {
+  const [summary] = await db
+    .select({
+      events: sql<number>`count(*)::int`,
+      activeUsers: sql<number>`count(distinct ${BillingUsageLedger.user_uuid})::int`,
+      credits: sql<string>`coalesce(sum(${BillingUsageLedger.charged_credits}), 0)`,
+    })
+    .from(BillingUsageLedger)
+    .where(and(gte(BillingUsageLedger.created_at, from), lte(BillingUsageLedger.created_at, to)));
+
+  const serviceRows = await db
+    .select({
+      type: BillingUsageLedger.usage_type,
+      events: sql<number>`count(*)::int`,
+      quantity: sql<string>`coalesce(sum(${BillingUsageLedger.quantity}), 0)`,
+      credits: sql<string>`coalesce(sum(${BillingUsageLedger.charged_credits}), 0)`,
+    })
+    .from(BillingUsageLedger)
+    .where(and(gte(BillingUsageLedger.created_at, from), lte(BillingUsageLedger.created_at, to)))
+    .groupBy(BillingUsageLedger.usage_type);
+
+  const dailyRows = await db
+    .select({
+      bucket: sql<Date>`date_trunc('day', ${BillingUsageLedger.created_at})`,
+      events: sql<number>`count(*)::int`,
+      credits: sql<string>`coalesce(sum(${BillingUsageLedger.charged_credits}), 0)`,
+      ttsCredits: sql<string>`coalesce(sum(case when ${BillingUsageLedger.usage_type} = 'tts_characters' then ${BillingUsageLedger.charged_credits} else 0 end), 0)`,
+      sttCredits: sql<string>`coalesce(sum(case when ${BillingUsageLedger.usage_type} = 'stt_seconds' then ${BillingUsageLedger.charged_credits} else 0 end), 0)`,
+      llmCredits: sql<string>`coalesce(sum(case when ${BillingUsageLedger.usage_type} = 'llm_tokens' then ${BillingUsageLedger.charged_credits} else 0 end), 0)`,
+    })
+    .from(BillingUsageLedger)
+    .where(and(gte(BillingUsageLedger.created_at, from), lte(BillingUsageLedger.created_at, to)))
+    .groupBy(sql`date_trunc('day', ${BillingUsageLedger.created_at})`)
+    .orderBy(sql`date_trunc('day', ${BillingUsageLedger.created_at})`);
+
+  const topUsers = await db
+    .select({
+      user_uuid: Users.user_uuid,
+      fullName: Users.fullName,
+      email: Users.email,
+      events: sql<number>`count(*)::int`,
+      credits: sql<string>`coalesce(sum(${BillingUsageLedger.charged_credits}), 0)`,
+      ttsEvents: sql<number>`count(*) filter (where ${BillingUsageLedger.usage_type} = 'tts_characters')::int`,
+      sttEvents: sql<number>`count(*) filter (where ${BillingUsageLedger.usage_type} = 'stt_seconds')::int`,
+      llmEvents: sql<number>`count(*) filter (where ${BillingUsageLedger.usage_type} = 'llm_tokens')::int`,
+    })
+    .from(BillingUsageLedger)
+    .innerJoin(Users, eq(BillingUsageLedger.user_uuid, Users.user_uuid))
+    .where(and(gte(BillingUsageLedger.created_at, from), lte(BillingUsageLedger.created_at, to)))
+    .groupBy(Users.user_uuid, Users.fullName, Users.email)
+    .orderBy(sql`sum(${BillingUsageLedger.charged_credits}) desc`)
+    .limit(10);
+
+  return GenResObj(Code.OK, true, "Platform usage overview fetched successfully", {
+    from: from.toISOString(),
+    to: to.toISOString(),
+    totals: {
+      events: Number(summary?.events ?? 0),
+      activeUsers: Number(summary?.activeUsers ?? 0),
+      credits: Number(summary?.credits ?? 0),
+    },
+    services: serviceRows.map((row) => ({
+      type: row.type,
+      events: Number(row.events),
+      quantity: Number(row.quantity),
+      credits: Number(row.credits),
+    })),
+    daily: dailyRows.map((row) => ({
+      bucket: (row.bucket instanceof Date ? row.bucket : new Date(row.bucket as unknown as string)).toISOString(),
+      events: Number(row.events),
+      credits: Number(row.credits),
+      ttsCredits: Number(row.ttsCredits),
+      sttCredits: Number(row.sttCredits),
+      llmCredits: Number(row.llmCredits),
+    })),
+    topUsers: topUsers.map((row) => ({
+      ...row,
+      events: Number(row.events),
+      credits: Number(row.credits),
+      ttsEvents: Number(row.ttsEvents),
+      sttEvents: Number(row.sttEvents),
+      llmEvents: Number(row.llmEvents),
+    })),
+  });
+};
 
 export const listUserSubscriptions = async (userUuid: string) => {
   await ensureDefaultPaygSubscription(userUuid);

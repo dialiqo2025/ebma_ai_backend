@@ -239,12 +239,14 @@ export const userSummary = async () => {
     const [totalSuperAnalystRow] = await db
       .select({ total_superAnalyst: sql<number>`count(*)` })
       .from(Users)
-      .where(eq(Users.role, "superAnalyst" as any));
+      // These legacy/admin roles may not exist in every deployed user_role enum yet.
+      // Compare as text so PostgreSQL doesn't reject the query parameter during enum coercion.
+      .where(sql`${Users.role}::text = ${"superAnalyst"}`);
 
     const [totalComplianceRow] = await db
       .select({ total_compliance: sql<number>`count(*)` })
       .from(Users)
-      .where(eq(Users.role, "compliance" as any));
+      .where(sql`${Users.role}::text = ${"compliance"}`);
 
     const total_users = Number(totalUsersRow?.total_users ?? 0);
     const total_active_users = Number(totalActiveUsersRow?.total_active_users ?? 0);

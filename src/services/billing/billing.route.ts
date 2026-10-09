@@ -25,6 +25,9 @@ router.patch("/admin/plans/:plan_uuid", superAdmin, BillingController.adminPlanU
 router.delete("/admin/plans/:plan_uuid", superAdmin, BillingController.adminPlanDelete);
 router.get("/admin/rates", superAdmin, BillingController.adminRates);
 router.put("/admin/rates", superAdmin, BillingController.adminRates);
+router.get("/admin/usage-overview", superAdmin, BillingController.adminUsageOverview);
+router.get("/admin/signup-free-credits", superAdmin, BillingController.adminSignupFreeCredits);
+router.put("/admin/signup-free-credits", superAdmin, BillingController.adminSignupFreeCredits);
 router.get("/admin/subscriptions", superAdmin, BillingController.adminSubscriptions);
 router.get("/admin/transactions", superAdmin, BillingController.adminTransactions);
 router.get("/admin/users/:user_uuid/wallet", superAdmin, BillingController.adminUserWallet);

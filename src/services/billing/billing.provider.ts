@@ -3,6 +3,7 @@ import { db } from "../../config/database/connection.database";
 import {
   BillingPlans,
   BillingRates,
+  BillingSettings,
   BillingSubscriptions,
   BillingUsageLedger,
   BillingWallets,
@@ -30,27 +31,35 @@ const currentGlobalPrices = async () => {
   } as typeof BILLING_PRICES;
 };
 
-const initialCredits = () => {
-  const value = Number(process.env.BILLING_INITIAL_CREDITS ?? 1000);
-  return Number.isFinite(value) && value >= 0 ? value : 1000;
+export const getSignupFreeCredits = async () => {
+  const [settings] = await db.select().from(BillingSettings).limit(1);
+  return Number(settings?.signup_free_credits ?? 1000);
 };
 
 const formatCredits = (value: number) =>
   Number.isInteger(value) ? String(value) : value.toFixed(2);
 
 export const ensureWallet = async (userUuid: string) => {
-  const [wallet] = await db
-    .insert(BillingWallets)
-    .values({ user_uuid: userUuid, balance_credits: initialCredits().toFixed(6) })
-    .onConflictDoNothing({ target: BillingWallets.user_uuid })
-    .returning();
-  if (wallet) return wallet;
   const [existing] = await db
     .select()
     .from(BillingWallets)
     .where(eq(BillingWallets.user_uuid, userUuid))
     .limit(1);
-  return existing;
+  if (existing) return existing;
+
+  const signupCredits = await getSignupFreeCredits();
+  const [wallet] = await db
+    .insert(BillingWallets)
+    .values({ user_uuid: userUuid, balance_credits: signupCredits.toFixed(6) })
+    .onConflictDoNothing({ target: BillingWallets.user_uuid })
+    .returning();
+  if (wallet) return wallet;
+  const [createdByConcurrentRequest] = await db
+    .select()
+    .from(BillingWallets)
+    .where(eq(BillingWallets.user_uuid, userUuid))
+    .limit(1);
+  return createdByConcurrentRequest;
 };
 
 export const getDefaultPaygPlan = async () => {
@@ -204,7 +213,7 @@ export const getBillingSummary = async (userUuid: string) => {
     balanceInr: Math.max(0, Number(wallet?.balance_credits ?? 0)),
     creditToInr: 1,
     overageCredits: Math.max(0, -Number(wallet?.balance_credits ?? 0)),
-    initialCredits: initialCredits(),
+    initialCredits: await getSignupFreeCredits(),
     usedCredits: Number(usage?.totalCredits ?? 0),
     usageQuantity: Number(usage?.totalQuantity ?? 0),
     plan: rates.plan

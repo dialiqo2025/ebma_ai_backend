@@ -5,6 +5,8 @@ export const userRoleEnum = pgEnum("user_role", [
   "admin",
   "superAdmin",
   "tenant",
+  "superAnalyst",
+  "compliance",
 ]);
 
 export const otpPurposeEnum = pgEnum("otp_purpose", [

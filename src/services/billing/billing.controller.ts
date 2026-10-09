@@ -247,6 +247,26 @@ export const BillingController = {
         : await AdminBilling.updateRates(req.body);
     res.status(result.code).json(result.data);
   },
+  adminUsageOverview: async (req: Request, res: Response) => {
+    const from = new Date(String(req.query.from || ""));
+    const to = new Date(String(req.query.to || ""));
+    if (Number.isNaN(from.valueOf()) || Number.isNaN(to.valueOf()) || from > to) {
+      res.status(400).json({
+        success: false,
+        message: "A valid date range is required",
+        data: null,
+      });
+      return;
+    }
+    const result = await AdminBilling.getAdminUsageOverview(from, to);
+    res.status(result.code).json(result.data);
+  },
+  adminSignupFreeCredits: async (req: Request, res: Response) => {
+    const result = req.method === "GET"
+      ? await AdminBilling.getSignupFreeCreditSetting()
+      : await AdminBilling.updateSignupFreeCreditSetting(Number(req.body?.credits));
+    res.status(result.code).json(result.data);
+  },
   adminSubscriptions: async (_req: Request, res: Response) => {
     const result = await AdminBilling.listSubscriptions();
     res.status(result.code).json(result.data);

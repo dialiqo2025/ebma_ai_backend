@@ -77,6 +77,13 @@ export const BillingWallets = pgTable("billing_wallets", {
   updated_at: timestamp("updated_at", { mode: "date" }).defaultNow().notNull(),
 });
 
+/** Platform-wide defaults controlled by superadmin. */
+export const BillingSettings = pgTable("billing_settings", {
+  setting_id: integer("setting_id").primaryKey().default(1),
+  signup_free_credits: numeric("signup_free_credits", { precision: 18, scale: 6 }).default("1000").notNull(),
+  updated_at: timestamp("updated_at", { mode: "date" }).defaultNow().notNull(),
+});
+
 export const BillingUsageLedger = pgTable("billing_usage_ledger", {
   usage_uuid: uuid("usage_uuid").defaultRandom().primaryKey(),
   user_uuid: uuid("user_uuid").notNull().references(() => Users.user_uuid, { onDelete: "cascade" }),

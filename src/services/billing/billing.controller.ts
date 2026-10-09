@@ -51,6 +51,31 @@ export const BillingController = {
     });
     res.status(result.code).json(result.data);
   },
+  usageOverview: async (req: Request, res: Response) => {
+    const from = new Date(String(req.query.from || ""));
+    const to = new Date(String(req.query.to || ""));
+    const bucketSize = String(req.query.bucket || "day");
+    if (
+      Number.isNaN(from.valueOf()) ||
+      Number.isNaN(to.valueOf()) ||
+      from > to ||
+      !["hour", "day"].includes(bucketSize)
+    ) {
+      res.status(400).json({
+        success: false,
+        message: "A valid date range and bucket (hour or day) are required",
+        data: null,
+      });
+      return;
+    }
+    const result = await Billing.getBillingUsageOverview(
+      userId(req),
+      from,
+      to,
+      bucketSize as "hour" | "day",
+    );
+    res.status(result.code).json(result.data);
+  },
   plans: async (_req: Request, res: Response) => {
     const result = await AdminBilling.listPublicPlans();
     res.status(result.code).json(result.data);

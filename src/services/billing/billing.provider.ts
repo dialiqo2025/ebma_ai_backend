@@ -265,3 +265,72 @@ export const listBillingUsage = async (
     pageSize,
   });
 };
+
+export const getBillingUsageOverview = async (
+  userUuid: string,
+  from: Date,
+  to: Date,
+  bucketSize: "hour" | "day",
+) => {
+  const bucketExpression = bucketSize === "hour"
+    ? sql<Date>`date_trunc('hour', ${BillingUsageLedger.created_at})`
+    : sql<Date>`date_trunc('day', ${BillingUsageLedger.created_at})`;
+  const rows = await db
+    .select({
+      bucket: bucketExpression,
+      events: sql<number>`count(*)::int`,
+      ttsRecords: sql<number>`count(*) filter (where ${BillingUsageLedger.usage_type} = 'tts_characters')::int`,
+      sttRecords: sql<number>`count(*) filter (where ${BillingUsageLedger.usage_type} = 'stt_seconds')::int`,
+      assistantRecords: sql<number>`count(*) filter (where ${BillingUsageLedger.usage_type} = 'llm_tokens')::int`,
+      credits: sql<string>`coalesce(sum(${BillingUsageLedger.charged_credits}), 0)`,
+      ttsCharacters: sql<string>`coalesce(sum(case when ${BillingUsageLedger.usage_type} = 'tts_characters' then ${BillingUsageLedger.quantity} else 0 end), 0)`,
+      sttSeconds: sql<string>`coalesce(sum(case when ${BillingUsageLedger.usage_type} = 'stt_seconds' then ${BillingUsageLedger.quantity} else 0 end), 0)`,
+      llmTokens: sql<string>`coalesce(sum(case when ${BillingUsageLedger.usage_type} = 'llm_tokens' then ${BillingUsageLedger.quantity} else 0 end), 0)`,
+    })
+    .from(BillingUsageLedger)
+    .where(and(
+      eq(BillingUsageLedger.user_uuid, userUuid),
+      gte(BillingUsageLedger.created_at, from),
+      lte(BillingUsageLedger.created_at, to),
+    ))
+    .groupBy(bucketExpression)
+    .orderBy(bucketExpression);
+
+  const buckets = rows.map((row) => {
+    const bucketDate = row.bucket instanceof Date
+      ? row.bucket
+      : new Date(row.bucket as unknown as string);
+    return {
+      bucket: bucketDate.toISOString(),
+      events: Number(row.events),
+      ttsRecords: Number(row.ttsRecords),
+      sttRecords: Number(row.sttRecords),
+      assistantRecords: Number(row.assistantRecords),
+      credits: Number(row.credits),
+      ttsCharacters: Number(row.ttsCharacters),
+      sttSeconds: Number(row.sttSeconds),
+      llmTokens: Number(row.llmTokens),
+    };
+  });
+  const totals = buckets.reduce(
+    (sum, row) => ({
+      events: sum.events + row.events,
+      ttsRecords: sum.ttsRecords + row.ttsRecords,
+      sttRecords: sum.sttRecords + row.sttRecords,
+      assistantRecords: sum.assistantRecords + row.assistantRecords,
+      credits: sum.credits + row.credits,
+      ttsCharacters: sum.ttsCharacters + row.ttsCharacters,
+      sttSeconds: sum.sttSeconds + row.sttSeconds,
+      llmTokens: sum.llmTokens + row.llmTokens,
+    }),
+    { events: 0, ttsRecords: 0, sttRecords: 0, assistantRecords: 0, credits: 0, ttsCharacters: 0, sttSeconds: 0, llmTokens: 0 },
+  );
+
+  return GenResObj(Code.OK, true, "Billing usage overview fetched successfully", {
+    from: from.toISOString(),
+    to: to.toISOString(),
+    bucketSize,
+    totals,
+    buckets,
+  });
+};

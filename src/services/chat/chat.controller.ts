@@ -15,7 +15,7 @@ export const ChatController = {
   message: async (req: Request, res: Response, next: NextFunction) => {
     try {
       const payload = chatMessageValidator.parse(req.body);
-      sendProviderResponse(res, await ChatProvider.replyToChatMessage(req.user?.userId as string, payload));
+      sendProviderResponse(res, await ChatProvider.replyToChatMessage(req.user?.userId as string, payload, req.user?.projectId, req.user?.apiKeyId));
     } catch (error) {
       next(error);
     }

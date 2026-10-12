@@ -39,7 +39,7 @@ export const SttController = {
       const payload = createSttSessionValidator.parse(req.body);
       sendProviderResponse(
         res,
-        await SttProvider.createSttSession(userUuidFromRequest(req), payload),
+        await SttProvider.createSttSession(userUuidFromRequest(req), payload, req.user?.projectId, req.user?.apiKeyId),
       );
     } catch (error) {
       next(error);
@@ -179,6 +179,8 @@ export const SttController = {
           userUuidFromRequest(req),
           payload,
           req.file as Express.Multer.File,
+          req.user?.projectId,
+          req.user?.apiKeyId,
         ),
       );
     } catch (error) {

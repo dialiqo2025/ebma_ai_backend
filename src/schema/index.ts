@@ -7,3 +7,4 @@ export * from "./billing.schema";
 export * from "./llm-model.schema";
 export * from "./api-key.schema";
 export * from "./playground-trial.schema";
+export * from "./project.schema";

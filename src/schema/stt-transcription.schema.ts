@@ -12,6 +12,8 @@ import {
 } from "drizzle-orm/pg-core";
 import { sttTranscriptionStatusEnum } from "./enums.schema";
 import { Users } from "./user.schema";
+import { Projects } from "./project.schema";
+import { ApiKeys } from "./api-key.schema";
 
 export const SttTranscriptions = pgTable(
   "stt_transcriptions",
@@ -20,6 +22,8 @@ export const SttTranscriptions = pgTable(
     user_uuid: uuid("user_uuid")
       .notNull()
       .references(() => Users.user_uuid, { onDelete: "cascade" }),
+    project_uuid: uuid("project_uuid").references(() => Projects.project_uuid, { onDelete: "set null" }),
+    api_key_uuid: uuid("api_key_uuid").references(() => ApiKeys.key_uuid, { onDelete: "set null" }),
     provider_job_id: varchar("provider_job_id", { length: 255 }).notNull(),
     original_filename: varchar("original_filename", { length: 512 }).notNull(),
     content_type: varchar("content_type", { length: 255 }),

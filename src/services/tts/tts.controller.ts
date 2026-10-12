@@ -26,6 +26,8 @@ export const TtsController = {
         userUuidFromRequest(req),
         payload,
         req.file,
+        req.user?.projectId,
+        req.user?.apiKeyId,
       );
       sendProviderResponse(res, result);
     } catch (error) {

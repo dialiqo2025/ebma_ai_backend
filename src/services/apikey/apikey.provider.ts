@@ -1,9 +1,10 @@
 import crypto from "crypto";
 import { and, desc, eq, isNull } from "drizzle-orm";
 import { db } from "../../config/database/connection.database";
-import { ApiKeys, type ApiKeyScope } from "../../schema";
+import { ApiKeys, Projects, type ApiKeyScope } from "../../schema";
 import { GenResObj } from "../../utils/responseFormat.util";
 import { HttpStatusCodes as Code } from "../../utils/httpType.util";
+import { ensureDefaultProject } from "../projects/project.helper";
 
 export const API_KEY_PREFIX = "ebma_sk_";
 const MAX_ACTIVE_KEYS = 10;
@@ -13,6 +14,7 @@ export const hashApiKey = (key: string) => crypto.createHash("sha256").update(ke
 
 const publicKey = (row: typeof ApiKeys.$inferSelect) => ({
   key_uuid: row.key_uuid,
+  project_uuid: row.project_uuid,
   name: row.name,
   prefix: row.key_prefix,
   scopes: row.scopes,
@@ -31,16 +33,24 @@ const parseScopes = (input: unknown): ApiKeyScope[] | null => {
 
 const parseName = (input: unknown) => (typeof input === "string" ? input.trim().slice(0, 100) : "");
 
-export const listKeys = async (userUuid: string) => {
-  const rows = await db.select().from(ApiKeys).where(eq(ApiKeys.user_uuid, userUuid)).orderBy(desc(ApiKeys.created_at));
+export const listKeys = async (userUuid: string, projectUuid?: string) => {
+  const rows = await db.select().from(ApiKeys).where(and(
+    eq(ApiKeys.user_uuid, userUuid),
+    ...(projectUuid ? [eq(ApiKeys.project_uuid, projectUuid)] : []),
+  )).orderBy(desc(ApiKeys.created_at));
   return GenResObj(Code.OK, true, "API keys fetched successfully", rows.map(publicKey));
 };
 
-export const createKey = async (userUuid: string, input: { name?: unknown; scopes?: unknown; expiresInDays?: unknown }) => {
+export const createKey = async (userUuid: string, input: { name?: unknown; scopes?: unknown; expiresInDays?: unknown; projectUuid?: unknown }) => {
   const name = parseName(input.name);
   if (!name) return GenResObj(Code.UNPROCESSABLE_ENTITY, false, "A key name is required");
   const scopes = parseScopes(input.scopes);
   if (!scopes) return GenResObj(Code.UNPROCESSABLE_ENTITY, false, "Scopes must be a non-empty list of stt, tts, llm, translate");
+  const requestedProjectUuid = typeof input.projectUuid === "string" ? input.projectUuid : undefined;
+  const project = requestedProjectUuid
+    ? (await db.select().from(Projects).where(and(eq(Projects.project_uuid, requestedProjectUuid), eq(Projects.user_uuid, userUuid), eq(Projects.status, "active"))).limit(1))[0]
+    : await ensureDefaultProject(userUuid);
+  if (!project) return GenResObj(Code.NOT_FOUND, false, "Active project not found");
   let expiresAt: Date | null = null;
   if (input.expiresInDays !== undefined && input.expiresInDays !== null) {
     const days = Number(input.expiresInDays);
@@ -54,6 +64,7 @@ export const createKey = async (userUuid: string, input: { name?: unknown; scope
   const secret = `${API_KEY_PREFIX}${crypto.randomBytes(24).toString("base64url")}`;
   const [row] = await db.insert(ApiKeys).values({
     user_uuid: userUuid,
+    project_uuid: project.project_uuid,
     name,
     key_prefix: `${secret.slice(0, API_KEY_PREFIX.length + 6)}…`,
     key_hash: hashApiKey(secret),
@@ -85,6 +96,10 @@ export const resolveApiKey = async (rawKey: string) => {
   const [row] = await db.select().from(ApiKeys).where(eq(ApiKeys.key_hash, hashApiKey(rawKey))).limit(1);
   if (!row || row.revoked_at) return { ok: false as const, message: "API key is invalid or revoked" };
   if (row.expires_at && row.expires_at < new Date()) return { ok: false as const, message: "API key has expired" };
+  const [project] = await db.select({ status: Projects.status }).from(Projects).where(and(
+    eq(Projects.project_uuid, row.project_uuid), eq(Projects.user_uuid, row.user_uuid),
+  )).limit(1);
+  if (!project || project.status !== "active") return { ok: false as const, message: "This API key belongs to an archived project" };
   void db.update(ApiKeys).set({ last_used_at: new Date() }).where(eq(ApiKeys.key_uuid, row.key_uuid))
     .catch((error) => console.error("Failed to record API key usage", error));
   return { ok: true as const, key: row };

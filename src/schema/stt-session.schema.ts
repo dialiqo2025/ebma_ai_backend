@@ -12,6 +12,8 @@ import {
 } from "drizzle-orm/pg-core";
 import { sttOutputModeEnum, sttSessionStatusEnum } from "./enums.schema";
 import { Users } from "./user.schema";
+import { Projects } from "./project.schema";
+import { ApiKeys } from "./api-key.schema";
 
 export const SttSessions = pgTable(
   "stt_sessions",
@@ -20,6 +22,8 @@ export const SttSessions = pgTable(
     user_uuid: uuid("user_uuid")
       .notNull()
       .references(() => Users.user_uuid, { onDelete: "cascade" }),
+    project_uuid: uuid("project_uuid").references(() => Projects.project_uuid, { onDelete: "set null" }),
+    api_key_uuid: uuid("api_key_uuid").references(() => ApiKeys.key_uuid, { onDelete: "set null" }),
     language: varchar("language", { length: 8 }).default("hi").notNull(),
     output_mode: sttOutputModeEnum("output_mode").default("native").notNull(),
     sample_rate: integer("sample_rate").default(16000).notNull(),

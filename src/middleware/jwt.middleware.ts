@@ -47,7 +47,12 @@ const authenticateApiKey = async (rawKey: string, role: string[], req: Request, 
     return;
   }
 
-  req.user = { userId: user.user_uuid, role: user.role, apiKeyId: resolved.key.key_uuid };
+  req.user = {
+    userId: user.user_uuid,
+    role: user.role,
+    apiKeyId: resolved.key.key_uuid,
+    projectId: resolved.key.project_uuid,
+  };
   next();
 };
 

@@ -150,6 +150,8 @@ const resolvePlanUnitPrices = async (userUuid: string) => {
 
 export const recordUsage = async (input: {
   userUuid: string;
+  projectUuid?: string | null;
+  apiKeyUuid?: string | null;
   type: keyof typeof BILLING_PRICES;
   quantity: number;
   idempotencyKey: string;
@@ -166,6 +168,8 @@ export const recordUsage = async (input: {
       .insert(BillingUsageLedger)
       .values({
         user_uuid: input.userUuid,
+        project_uuid: input.projectUuid ?? null,
+        api_key_uuid: input.apiKeyUuid ?? null,
         usage_type: input.type,
         quantity: input.quantity.toFixed(6),
         unit_price_credits: unitPrice.toFixed(6),

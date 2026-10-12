@@ -1,11 +1,13 @@
 import { index, jsonb, pgTable, timestamp, uuid, varchar } from "drizzle-orm/pg-core";
 import { Users } from "./user.schema";
+import { Projects } from "./project.schema";
 
 export type ApiKeyScope = "stt" | "tts" | "llm" | "translate";
 
 export const ApiKeys = pgTable("api_keys", {
   key_uuid: uuid("key_uuid").defaultRandom().primaryKey(),
   user_uuid: uuid("user_uuid").notNull().references(() => Users.user_uuid, { onDelete: "cascade" }),
+  project_uuid: uuid("project_uuid").notNull().references(() => Projects.project_uuid, { onDelete: "restrict" }),
   name: varchar("name", { length: 100 }).notNull(),
   key_prefix: varchar("key_prefix", { length: 24 }).notNull(),
   key_hash: varchar("key_hash", { length: 64 }).notNull().unique(),
@@ -15,4 +17,7 @@ export const ApiKeys = pgTable("api_keys", {
   revoked_at: timestamp("revoked_at", { mode: "date" }),
   created_at: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
   updated_at: timestamp("updated_at", { mode: "date" }).defaultNow().notNull(),
-}, (table) => ({ userIdx: index("api_keys_user_idx").on(table.user_uuid) }));
+}, (table) => [
+  index("api_keys_user_idx").on(table.user_uuid),
+  index("api_keys_project_idx").on(table.project_uuid),
+]);

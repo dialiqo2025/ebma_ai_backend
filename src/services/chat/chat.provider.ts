@@ -29,7 +29,7 @@ const truncateForSpeech = (text: string) => {
   return (lastBoundary > MAX_REPLY_CHARACTERS / 2 ? slice.slice(0, lastBoundary + 1) : slice).trim();
 };
 
-export const replyToChatMessage = async (userUuid: string, payload: ChatMessage) => {
+export const replyToChatMessage = async (userUuid: string, payload: ChatMessage, projectUuid?: string, apiKeyUuid?: string) => {
   const startedAt = Date.now();
 
   try {
@@ -62,6 +62,8 @@ export const replyToChatMessage = async (userUuid: string, payload: ChatMessage)
     // conservative character-based estimate until provider usage is available.
     void recordUsage({
       userUuid,
+      ...(projectUuid ? { projectUuid } : {}),
+      ...(apiKeyUuid ? { apiKeyUuid } : {}),
       type: "llm_tokens",
       quantity: Math.ceil((payload.message.length + parsed.text.length) / 4),
       idempotencyKey: `llm:${userUuid}:${Date.now()}`,

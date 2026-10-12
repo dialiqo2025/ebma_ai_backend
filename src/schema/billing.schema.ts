@@ -1,5 +1,7 @@
 import { boolean, integer, numeric, pgTable, timestamp, uuid, varchar, jsonb, index } from "drizzle-orm/pg-core";
 import { Users } from "./user.schema";
+import { Projects } from "./project.schema";
+import { ApiKeys } from "./api-key.schema";
 import { billingUsageTypeEnum } from "./enums.schema";
 
 export const BillingPlans = pgTable("billing_plans", {
@@ -87,6 +89,8 @@ export const BillingSettings = pgTable("billing_settings", {
 export const BillingUsageLedger = pgTable("billing_usage_ledger", {
   usage_uuid: uuid("usage_uuid").defaultRandom().primaryKey(),
   user_uuid: uuid("user_uuid").notNull().references(() => Users.user_uuid, { onDelete: "cascade" }),
+  project_uuid: uuid("project_uuid").references(() => Projects.project_uuid, { onDelete: "set null" }),
+  api_key_uuid: uuid("api_key_uuid").references(() => ApiKeys.key_uuid, { onDelete: "set null" }),
   usage_type: billingUsageTypeEnum("usage_type").notNull(),
   quantity: numeric("quantity", { precision: 18, scale: 6 }).notNull(),
   unit_price_credits: numeric("unit_price_credits", { precision: 18, scale: 6 }).notNull(),
@@ -97,6 +101,7 @@ export const BillingUsageLedger = pgTable("billing_usage_ledger", {
   created_at: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
 }, (table) => ({
   userCreatedIdx: index("billing_usage_user_created_idx").on(table.user_uuid, table.created_at),
+  projectCreatedIdx: index("billing_usage_project_created_idx").on(table.project_uuid, table.created_at),
 }));
 
 export const BillingSubscriptions = pgTable("billing_subscriptions", {

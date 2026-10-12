@@ -8,6 +8,8 @@ import {
   varchar,
 } from "drizzle-orm/pg-core";
 import { Users } from "./user.schema";
+import { Projects } from "./project.schema";
+import { ApiKeys } from "./api-key.schema";
 import {
   ttsAudioFormatEnum,
   ttsGenerationStatusEnum,
@@ -19,6 +21,8 @@ export const TtsGenerations = pgTable("tts_generations", {
   user_uuid: uuid("user_uuid")
     .notNull()
     .references(() => Users.user_uuid, { onDelete: "cascade" }),
+  project_uuid: uuid("project_uuid").references(() => Projects.project_uuid, { onDelete: "set null" }),
+  api_key_uuid: uuid("api_key_uuid").references(() => ApiKeys.key_uuid, { onDelete: "set null" }),
   input_text: text("input_text").notNull(),
   language: varchar("language", { length: 32 }).default("auto").notNull(),
   voice_mode: ttsVoiceModeEnum("voice_mode").default("default").notNull(),

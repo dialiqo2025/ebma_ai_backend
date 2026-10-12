@@ -107,6 +107,8 @@ export const createTtsGeneration = async (
   userUuid: string,
   payload: CreateTtsGeneration,
   voiceSample?: Express.Multer.File,
+  projectUuid?: string,
+  apiKeyUuid?: string,
 ) => {
   if (payload.voiceMode === "clone") {
     if (!voiceSample?.buffer?.length) {
@@ -136,6 +138,8 @@ export const createTtsGeneration = async (
     .insert(TtsGenerations)
     .values({
       user_uuid: userUuid,
+      project_uuid: projectUuid ?? null,
+      api_key_uuid: apiKeyUuid ?? null,
       input_text: payload.text,
       language: payload.language,
       voice_mode: payload.voiceMode,
@@ -478,6 +482,8 @@ export const generateTtsAudio = async (generationUuid: string, userUuid: string)
 
     void recordUsage({
       userUuid,
+      projectUuid: claimed.project_uuid,
+      apiKeyUuid: claimed.api_key_uuid,
       type: "tts_characters",
       quantity: claimed.input_text.length,
       idempotencyKey: `tts:${claimed.generation_uuid}`,
@@ -737,6 +743,8 @@ export const prepareTtsStream = async (
 
         void recordUsage({
           userUuid,
+          projectUuid: claimed.project_uuid,
+          apiKeyUuid: claimed.api_key_uuid,
           type: "tts_characters",
           quantity: claimed.input_text.length,
           idempotencyKey: `tts-stream:${generationUuid}`,

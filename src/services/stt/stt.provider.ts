@@ -50,11 +50,13 @@ const findOwnedSession = async (sessionUuid: string, userUuid: string) => {
   return session;
 };
 
-export const createSttSession = async (userUuid: string, payload: CreateSttSession) => {
+export const createSttSession = async (userUuid: string, payload: CreateSttSession, projectUuid?: string, apiKeyUuid?: string) => {
   const [session] = await db
     .insert(SttSessions)
     .values({
       user_uuid: userUuid,
+      project_uuid: projectUuid ?? null,
+      api_key_uuid: apiKeyUuid ?? null,
       language: payload.language,
       output_mode: payload.mode,
       sample_rate: payload.sampleRate,
@@ -469,6 +471,8 @@ export const addSttFinalSegment = async (
   if (!result.duplicate) {
     void recordUsage({
       userUuid,
+      projectUuid: result.session.project_uuid,
+      apiKeyUuid: result.session.api_key_uuid,
       type: "stt_seconds",
       quantity: Number(result.segment.audio_seconds),
       idempotencyKey: `stt:${sessionUuid}:${payload.seg}`,
@@ -693,6 +697,24 @@ const applyProviderJobSnapshot = async (
     .where(eq(SttTranscriptions.transcription_uuid, row.transcription_uuid))
     .returning();
 
+  if (status === "completed" && row.status !== "completed") {
+    const seconds = typeof job.audio_seconds === "number"
+      ? job.audio_seconds
+      : typeof result?.duration_s === "number" ? result.duration_s : 0;
+    if (seconds > 0) {
+      void recordUsage({
+        userUuid: row.user_uuid,
+        projectUuid: row.project_uuid,
+        apiKeyUuid: row.api_key_uuid,
+        type: "stt_seconds",
+        quantity: seconds,
+        idempotencyKey: `stt-upload:${row.transcription_uuid}`,
+        providerReference: row.provider_job_id,
+        metadata: { transcriptionUuid: row.transcription_uuid, language: row.language },
+      });
+    }
+  }
+
   return updated ?? row;
 };
 
@@ -700,6 +722,8 @@ export const createSttTranscription = async (
   userUuid: string,
   payload: CreateSttTranscription,
   file: Express.Multer.File,
+  projectUuid?: string,
+  apiKeyUuid?: string,
 ) => {
   if (!file?.buffer?.length) {
     return GenResObj(Code.BAD_REQUEST, false, "Audio file is required");
@@ -723,6 +747,8 @@ export const createSttTranscription = async (
       .insert(SttTranscriptions)
       .values({
         user_uuid: userUuid,
+        project_uuid: projectUuid ?? null,
+        api_key_uuid: apiKeyUuid ?? null,
         provider_job_id: created.job_id,
         original_filename: file.originalname || "recording",
         content_type: file.mimetype || null,

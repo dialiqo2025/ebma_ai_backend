@@ -21,7 +21,12 @@ export default defineConfig({
     database: requiredEnv("DATABASE_NAME"),
     user: requiredEnv("DATABASE_USER"),
     password: requiredEnv("DATABASE_PASS"),
-    ssl: process.env.DATABASE_SSL !== "false",
+    // Match the backend's PostgreSQL pool configuration (Aiven uses a
+    // certificate chain that is not trusted by the local Node.js CA store).
+    ssl:
+      process.env.DATABASE_SSL === "false"
+        ? false
+        : { rejectUnauthorized: false },
   },
   verbose: true,
   strict: true,

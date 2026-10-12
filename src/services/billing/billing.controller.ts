@@ -261,6 +261,43 @@ export const BillingController = {
     const result = await AdminBilling.getAdminUsageOverview(from, to);
     res.status(result.code).json(result.data);
   },
+  adminUserUsage: async (req: Request, res: Response) => {
+    const from = new Date(String(req.query.from || ""));
+    const to = new Date(String(req.query.to || ""));
+    const minCredits = req.query.minCredits === undefined || req.query.minCredits === ""
+      ? undefined
+      : Number(req.query.minCredits);
+    const maxCredits = req.query.maxCredits === undefined || req.query.maxCredits === ""
+      ? undefined
+      : Number(req.query.maxCredits);
+    if (Number.isNaN(from.valueOf()) || Number.isNaN(to.valueOf()) || from > to) {
+      res.status(400).json({
+        success: false,
+        message: "A valid date range is required",
+        data: null,
+      });
+      return;
+    }
+    if (
+      (minCredits !== undefined && (!Number.isFinite(minCredits) || minCredits < 0)) ||
+      (maxCredits !== undefined && (!Number.isFinite(maxCredits) || maxCredits < 0)) ||
+      (minCredits !== undefined && maxCredits !== undefined && minCredits > maxCredits)
+    ) {
+      res.status(400).json({ success: false, message: "Enter a valid credit usage range", data: null });
+      return;
+    }
+    const result = await AdminBilling.getAdminUserUsage(
+      from,
+      to,
+      Number(req.query.page) || 1,
+      Number(req.query.pageSize) || 25,
+      String(req.query.search || ""),
+      minCredits,
+      maxCredits,
+      req.query.sort === "asc" ? "asc" : "desc",
+    );
+    res.status(result.code).json(result.data);
+  },
   adminSignupFreeCredits: async (req: Request, res: Response) => {
     const result = req.method === "GET"
       ? await AdminBilling.getSignupFreeCreditSetting()

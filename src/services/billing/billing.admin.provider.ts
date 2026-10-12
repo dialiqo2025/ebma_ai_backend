@@ -1,4 +1,4 @@
-import { and, desc, eq, gte, lte, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, ilike, lte, or, sql } from "drizzle-orm";
 import { db } from "../../config/database/connection.database";
 import {
   BillingPlans,
@@ -339,6 +339,105 @@ export const getAdminUsageOverview = async (from: Date, to: Date) => {
       sttEvents: Number(row.sttEvents),
       llmEvents: Number(row.llmEvents),
     })),
+  });
+};
+
+export const getAdminUserUsage = async (
+  from: Date,
+  to: Date,
+  page = 1,
+  limit = 25,
+  search = "",
+  minCredits?: number,
+  maxCredits?: number,
+  sort: "desc" | "asc" = "desc",
+) => {
+  const safePage = Math.max(1, Math.floor(page));
+  const safeLimit = Math.min(100, Math.max(1, Math.floor(limit)));
+  const offset = (safePage - 1) * safeLimit;
+  const term = search.trim();
+  const userFilter = term
+    ? or(ilike(Users.fullName, `%${term}%`), ilike(Users.email, `%${term}%`))
+    : undefined;
+  const usagePeriod = and(
+    gte(BillingUsageLedger.created_at, from),
+    lte(BillingUsageLedger.created_at, to),
+  );
+  const userUsage = db
+    .select({
+      user_uuid: Users.user_uuid,
+      fullName: Users.fullName,
+      email: Users.email,
+      events: sql<number>`count(${BillingUsageLedger.usage_uuid})::int`.as("events"),
+      credits: sql<number>`coalesce(sum(${BillingUsageLedger.charged_credits}), 0)`.as("credits"),
+      ttsEvents: sql<number>`count(*) filter (where ${BillingUsageLedger.usage_type} = 'tts_characters')::int`.as("tts_events"),
+      sttEvents: sql<number>`count(*) filter (where ${BillingUsageLedger.usage_type} = 'stt_seconds')::int`.as("stt_events"),
+      llmEvents: sql<number>`count(*) filter (where ${BillingUsageLedger.usage_type} = 'llm_tokens')::int`.as("llm_events"),
+      sttQuantity: sql<number>`coalesce(sum(case when ${BillingUsageLedger.usage_type} = 'stt_seconds' then ${BillingUsageLedger.quantity} else 0 end), 0)`.as("stt_quantity"),
+      ttsQuantity: sql<number>`coalesce(sum(case when ${BillingUsageLedger.usage_type} = 'tts_characters' then ${BillingUsageLedger.quantity} else 0 end), 0)`.as("tts_quantity"),
+      llmQuantity: sql<number>`coalesce(sum(case when ${BillingUsageLedger.usage_type} = 'llm_tokens' then ${BillingUsageLedger.quantity} else 0 end), 0)`.as("llm_quantity"),
+    })
+    .from(Users)
+    .leftJoin(
+      BillingUsageLedger,
+      and(
+        eq(BillingUsageLedger.user_uuid, Users.user_uuid),
+        usagePeriod,
+      ),
+    )
+    .where(userFilter)
+    .groupBy(Users.user_uuid, Users.fullName, Users.email)
+    .as("user_usage");
+  const creditFilters = [
+    minCredits !== undefined ? gte(userUsage.credits, minCredits) : undefined,
+    maxCredits !== undefined ? lte(userUsage.credits, maxCredits) : undefined,
+  ].filter((condition): condition is NonNullable<typeof condition> => Boolean(condition));
+  const creditFilter = creditFilters.length ? and(...creditFilters) : undefined;
+
+  const [[summaryResult], [creditRange], rows] = await Promise.all([
+    db.select({
+      total: sql<number>`count(*)::int`,
+      totalRequests: sql<number>`coalesce(sum(${userUsage.events}), 0)::int`,
+      totalCredits: sql<number>`coalesce(sum(${userUsage.credits}), 0)`,
+    }).from(userUsage).where(creditFilter),
+    db.select({ maxCredits: sql<number>`coalesce(max(${userUsage.credits}), 0)` }).from(userUsage),
+    db
+      .select()
+      .from(userUsage)
+      .where(creditFilter)
+      .orderBy(sort === "asc" ? asc(userUsage.credits) : desc(userUsage.credits), userUsage.fullName)
+    .limit(safeLimit)
+      .offset(offset),
+  ]);
+
+  const total = Number(summaryResult?.total ?? 0);
+  return GenResObj(Code.OK, true, "User usage fetched successfully", {
+    from: from.toISOString(),
+    to: to.toISOString(),
+    creditRangeMax: Number(creditRange?.maxCredits ?? 0),
+    summary: {
+      totalAccounts: total,
+      totalRequests: Number(summaryResult?.totalRequests ?? 0),
+      totalCredits: Number(summaryResult?.totalCredits ?? 0),
+    },
+    items: rows.map((row) => ({
+      ...row,
+      events: Number(row.events),
+      credits: Number(row.credits),
+      ttsEvents: Number(row.ttsEvents),
+      sttEvents: Number(row.sttEvents),
+      llmEvents: Number(row.llmEvents),
+      sttQuantity: Number(row.sttQuantity),
+      ttsQuantity: Number(row.ttsQuantity),
+      llmQuantity: Number(row.llmQuantity),
+    })),
+    pagination: {
+      page: safePage,
+      pageSize: safeLimit,
+      total,
+      totalPages: Math.ceil(total / safeLimit),
+      hasNextPage: offset + rows.length < total,
+    },
   });
 };
 

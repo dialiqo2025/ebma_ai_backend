@@ -35,6 +35,12 @@ const corsOrigins = [
   "http://localhost:3001",
   "http://127.0.0.1:3000",
   "http://127.0.0.1:3001",
+  "ebma.ai",
+  "https://ebma.ai",
+  "www.ebma.ai",
+  "https://www.ebma.ai",
+  "admin.ebma.ai",
+  "https://admin.ebma.ai"
 ]
   .filter(Boolean)
   .join(",")

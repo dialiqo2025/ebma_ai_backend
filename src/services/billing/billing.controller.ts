@@ -30,6 +30,11 @@ const isRazorpaySessionId = (sessionId: string) =>
   sessionId.startsWith("plink_") || sessionId.startsWith("pay_");
 
 export const BillingController = {
+  publicPricing: async (_req: Request, res: Response) => {
+    const result = await Billing.getPublicPricing();
+    res.setHeader("Cache-Control", "no-store");
+    res.status(result.code).json(result.data);
+  },
   summary: async (req: Request, res: Response) => {
     const result = await Billing.getBillingSummary(userId(req));
     res.status(result.code).json(result.data);

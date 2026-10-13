@@ -4,6 +4,7 @@ import { BillingController } from "./billing.controller";
 
 const router = Router();
 const authenticated = authCheck(["superAdmin", "admin", "tenant", "user", "superAnalyst", "compliance"]);
+router.get("/public/pricing", BillingController.publicPricing);
 router.get("/summary", authenticated, BillingController.summary);
 router.get("/usage/overview", authenticated, BillingController.usageOverview);
 router.get("/usage", authenticated, BillingController.usage);

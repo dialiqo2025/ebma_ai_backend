@@ -10,6 +10,7 @@ import {
 } from "../../schema";
 import { GenResObj } from "../../utils/responseFormat.util";
 import { HttpStatusCodes as Code } from "../../utils/httpType.util";
+import { customPricingRecipient } from "../../utils/email.util";
 
 export const BILLING_PRICES = {
   tts_characters: Number(process.env.BILLING_TTS_CREDITS_PER_CHARACTER ?? 0.03),
@@ -115,6 +116,12 @@ export const ensureDefaultPaygSubscription = async (userUuid: string) => {
 
 const resolvePlanUnitPrices = async (userUuid: string) => {
   const plan = await ensureDefaultPaygSubscription(userUuid);
+  return resolvePlanPrices(plan);
+};
+
+const resolvePlanPrices = async (
+  plan: Awaited<ReturnType<typeof getDefaultPaygPlan>>,
+) => {
   const global = await currentGlobalPrices();
 
   const ttsPer1000 = Number(
@@ -146,6 +153,30 @@ const resolvePlanUnitPrices = async (userUuid: string) => {
       llm_tokens: Number.isFinite(llmPer1000) ? llmPer1000 / 1000 : global.llm_tokens,
     },
   };
+};
+
+/** Public, non-user-specific pricing for the marketing website. */
+export const getPublicPricing = async () => {
+  const plan = await getDefaultPaygPlan();
+  const rates = await resolvePlanPrices(plan);
+  const signupFreeCredits = await getSignupFreeCredits();
+
+  return GenResObj(Code.OK, true, "Public pricing fetched successfully", {
+    creditToInr: 1,
+    signupFreeCredits,
+    customPricingEmail: customPricingRecipient(),
+    plan: plan
+      ? {
+          code: plan.code,
+          name: plan.name,
+        }
+      : null,
+    rates: {
+      ttsCreditsPer1000Chars: rates.ttsCreditsPer1000Chars,
+      sttCreditsPerMinute: rates.sttCreditsPerMinute,
+      llmCreditsPer1000Tokens: rates.unitPrices.llm_tokens * 1000,
+    },
+  });
 };
 
 export const recordUsage = async (input: {

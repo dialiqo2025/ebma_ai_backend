@@ -12,6 +12,7 @@ import ApiKey from "./apikey/apikey.route";
 import Translate from "./translate/translate.route";
 import Playground from "./playground/playground.route";
 import Projects from "./projects/projects.route";
+import Contact from "./contact/contact.route";
 
 const router = Router();
 
@@ -28,5 +29,6 @@ router.use("/translate", Translate);
 // Public website playground (IP-limited; GPU stays behind this API)
 router.use("/playground", Playground);
 router.use("/projects", Projects);
+router.use("/contact", Contact);
 
 export default router;

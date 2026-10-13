@@ -39,8 +39,11 @@ const corsOrigins = [
   "https://ebma.ai",
   "www.ebma.ai",
   "https://www.ebma.ai",
+  "https://ebma-ai-website.onrender.com",
+  "https://ebma-ai-frontend.onrender.com",
   "admin.ebma.ai",
-  "https://admin.ebma.ai"
+  "https://admin.ebma.ai",
+  "https://admin.ebma.ai/"
 ]
   .filter(Boolean)
   .join(",")

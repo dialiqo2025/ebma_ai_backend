@@ -21,6 +21,22 @@ const siteUrl = () =>
 export const customPricingRecipient = () =>
   process.env.CUSTOM_PRICING_TO_EMAIL?.trim() || "hello@ebma.ai";
 
+type EmailProvider = "resend" | "smtp";
+
+const positiveInteger = (value: string | undefined, fallback: number) => {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+};
+
+export const emailDeliveryProvider = (): EmailProvider => {
+  const configured = (process.env.EMAIL_PROVIDER || "auto").trim().toLowerCase();
+  if (configured === "auto") {
+    return process.env.RESEND_API_KEY?.trim() ? "resend" : "smtp";
+  }
+  if (configured === "resend" || configured === "smtp") return configured;
+  throw new Error("EMAIL_PROVIDER must be auto, resend, or smtp");
+};
+
 const emailShell = (content: string, preheader: string) => `<!doctype html>
 <html lang="en">
   <head>
@@ -161,6 +177,60 @@ export const sendEmail = async (params: {
   replyTo?: string;
   attachments?: Mail.Attachment[];
 }) => {
+  const provider = emailDeliveryProvider();
+  if (provider === "resend") {
+    const apiKey = process.env.RESEND_API_KEY?.trim();
+    const from = (process.env.RESEND_FROM || process.env.SMTP_FROM)?.trim();
+    if (!apiKey || !from) {
+      throw new Error("RESEND_API_KEY and RESEND_FROM must be configured");
+    }
+    if (params.attachments?.length) {
+      throw new Error("Attachments are not configured for the Resend email provider");
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(
+      () => controller.abort(),
+      positiveInteger(process.env.EMAIL_TIMEOUT_MS, 15_000),
+    );
+
+    try {
+      const response = await fetch("https://api.resend.com/emails", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          from,
+          to: [params.to],
+          reply_to: params.replyTo,
+          subject: params.subject,
+          text: params.text,
+          html: params.html,
+        }),
+        signal: controller.signal,
+      });
+
+      const result = (await response.json().catch(() => null)) as
+        | { id?: string; message?: string; name?: string }
+        | null;
+      if (!response.ok) {
+        throw new Error(
+          `Resend delivery failed (${response.status}): ${result?.message || result?.name || "Unknown provider response"}`,
+        );
+      }
+      return;
+    } catch (error) {
+      if (error instanceof Error && error.name === "AbortError") {
+        throw new Error("Email provider request timed out");
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
   const smtpPort = Number(process.env.SMTP_PORT ?? 587);
   const smtpHost = process.env.SMTP_HOST;
   const smtpUser = process.env.SMTP_USER;
@@ -175,6 +245,9 @@ export const sendEmail = async (params: {
     port: smtpPort,
     secure: smtpPort === 465,
     auth: { user: smtpUser, pass: smtpPass },
+    connectionTimeout: positiveInteger(process.env.EMAIL_TIMEOUT_MS, 15_000),
+    greetingTimeout: positiveInteger(process.env.EMAIL_TIMEOUT_MS, 15_000),
+    socketTimeout: positiveInteger(process.env.EMAIL_TIMEOUT_MS, 15_000),
   });
 
   await transporter.sendMail({

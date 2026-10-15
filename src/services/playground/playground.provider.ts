@@ -10,7 +10,7 @@ import {
   SttModelError,
 } from "../stt/stt.model";
 import { mapProviderTranscriptionStatus } from "../stt/stt.helper";
-import { isSttModelConfigured } from "../stt/stt.helper";
+import { isSttModelConfigured, STT_LANGUAGES } from "../stt/stt.helper";
 import { synthesizeWithTtsModel, TtsModelError } from "../tts/tts.model";
 import { isTtsModelConfigured } from "../tts/tts.helper";
 import { clientIpFromRequest, hashClientIp } from "./playground.ip";
@@ -100,6 +100,17 @@ const consumeTrial = async (ipHash: string, api: PlaygroundApi, limit: number) =
     if (!retried) return null;
     return { remaining: Math.max(0, limit - retried.use_count) };
   }
+};
+
+/** Public language catalog for the marketing site carousel (same list as STT options). */
+export const getPlaygroundLanguages = async () => {
+  const languages = STT_LANGUAGES.filter((language) => language.code !== "auto").map(
+    (language) => ({
+      code: language.code,
+      name: language.name,
+    }),
+  );
+  return GenResObj(Code.OK, true, "Supported languages", { languages });
 };
 
 export const getPlaygroundStatus = async (req: Request, api: PlaygroundApi) => {

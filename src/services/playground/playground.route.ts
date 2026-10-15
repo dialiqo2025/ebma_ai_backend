@@ -12,6 +12,8 @@ router.use(playgroundOriginGuard);
 
 router.get("/status", PlaygroundController.status);
 
+router.get("/languages", PlaygroundController.languages);
+
 router.post("/tts", playgroundRateLimitGuard, PlaygroundController.tts);
 
 router.post(

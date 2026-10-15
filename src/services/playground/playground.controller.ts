@@ -13,6 +13,15 @@ export const PlaygroundController = {
     }
   },
 
+  languages: async (_req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { code, data } = await PlaygroundProvider.getPlaygroundLanguages();
+      res.status(code).json(data);
+    } catch (error) {
+      next(error);
+    }
+  },
+
   tts: async (req: Request, res: Response, next: NextFunction) => {
     try {
       const payload = playgroundTtsBody.parse(req.body);

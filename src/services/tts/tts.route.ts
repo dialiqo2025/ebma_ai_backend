@@ -2,9 +2,25 @@ import { Router } from "express";
 import { authCheck } from "../../middleware/jwt.middleware";
 import { TtsController } from "./tts.controller";
 import { ttsVoiceSampleUpload } from "./tts.upload";
+import { TtsVoiceController } from "./tts.voice.controller";
 
 const router = Router();
 const authenticated = authCheck(["user", "admin", "superAdmin", "tenant"]);
+
+router.post("/voices", authenticated, (req, res, next) => {
+  ttsVoiceSampleUpload(req, res, (uploadError) => {
+    if (uploadError) {
+      res.status(413).json({ success: false, message: "Voice sample exceeds the upload size limit", data: null });
+      return;
+    }
+    next();
+  });
+}, TtsVoiceController.create);
+router.get("/voices", authenticated, TtsVoiceController.list);
+router.get("/voices/:voice_uuid", authenticated, TtsVoiceController.get);
+router.patch("/voices/:voice_uuid", authenticated, TtsVoiceController.update);
+router.delete("/voices/:voice_uuid", authenticated, TtsVoiceController.remove);
+router.get("/voices/:voice_uuid/audio", authenticated, TtsVoiceController.audio);
 
 router.get("/options", authenticated, TtsController.options);
 router.post(

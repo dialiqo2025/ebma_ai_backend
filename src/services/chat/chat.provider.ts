@@ -60,7 +60,7 @@ export const replyToChatMessage = async (userUuid: string, payload: ChatMessage,
 
     // The provider adapter currently exposes no token usage metadata. Use a
     // conservative character-based estimate until provider usage is available.
-    void recordUsage({
+    await recordUsage({
       userUuid,
       ...(projectUuid ? { projectUuid } : {}),
       ...(apiKeyUuid ? { apiKeyUuid } : {}),

@@ -1,6 +1,7 @@
 export * from "./user.schema";
 export * from "./enums.schema";
 export * from "./tts-generation.schema";
+export * from "./tts-voice.schema";
 export * from "./stt-session.schema";
 export * from "./stt-transcription.schema";
 export * from "./billing.schema";

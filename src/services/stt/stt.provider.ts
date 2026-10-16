@@ -469,7 +469,7 @@ export const addSttFinalSegment = async (
   if (!result.segment) throw new Error("STT segment persistence failed");
 
   if (!result.duplicate) {
-    void recordUsage({
+    await recordUsage({
       userUuid,
       projectUuid: result.session.project_uuid,
       apiKeyUuid: result.session.api_key_uuid,
@@ -702,7 +702,7 @@ const applyProviderJobSnapshot = async (
       ? job.audio_seconds
       : typeof result?.duration_s === "number" ? result.duration_s : 0;
     if (seconds > 0) {
-      void recordUsage({
+      await recordUsage({
         userUuid: row.user_uuid,
         projectUuid: row.project_uuid,
         apiKeyUuid: row.api_key_uuid,

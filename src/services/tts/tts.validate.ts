@@ -30,8 +30,8 @@ const ttsFields = {
     .max(1500, "Text must be at most 1500 characters"),
   language: languageValidator.default("auto"),
   voiceMode: z.enum(["default", "clone"]).default("default"),
-  /** Legacy optional id; clone now uses uploaded `voiceSample` → GPU `reference`. */
-  voiceId: z.string().trim().min(1).max(255).optional(),
+  /** Owned voice UUID from the user's reusable voice library. */
+  voiceId: z.string().uuid("Invalid saved voice ID").optional(),
   sampleTranscript: sampleTranscriptField,
   emotion: emotionField,
   speed: z.coerce.number().min(0.5).max(1.5).default(1),
@@ -46,7 +46,7 @@ export const updateTtsGenerationValidator = z
     text: ttsFields.text.optional(),
     language: languageValidator.optional(),
     voiceMode: z.enum(["default", "clone"]).optional(),
-    voiceId: z.string().trim().min(1).max(255).nullable().optional(),
+    voiceId: z.string().uuid("Invalid saved voice ID").nullable().optional(),
     sampleTranscript: sampleTranscriptField,
     emotion: emotionField,
     speed: z.coerce.number().min(0.5).max(1.5).optional(),

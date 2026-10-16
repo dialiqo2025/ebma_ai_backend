@@ -10,6 +10,11 @@ const REFERENCE_DIRECTORY = path.resolve(
     path.join(process.cwd(), "storage", "tts-reference"),
 );
 
+const VOICE_LIBRARY_DIRECTORY = path.resolve(
+  process.env.TTS_VOICE_LIBRARY_DIRECTORY ??
+    path.join(process.cwd(), "storage", "tts-voices"),
+);
+
 const ALLOWED_REFERENCE_EXTENSIONS = new Set([
   "wav",
   "mp3",
@@ -106,7 +111,7 @@ const extensionFromUpload = (file: Express.Multer.File) => {
   if (mime.includes("ogg")) return "ogg";
   if (mime.includes("webm")) return "webm";
   if (mime.includes("mp4") || mime.includes("m4a")) return "m4a";
-  return "wav";
+  return "";
 };
 
 export const isAllowedTtsReferenceSample = (file: Express.Multer.File) => {
@@ -144,6 +149,47 @@ export const deleteTtsReferenceAudio = async (fileName: string | null) => {
   if (!fileName) return;
   await rm(getTtsReferenceAudioPath(fileName), { force: true });
 };
+
+export const saveTtsVoiceAudio = async (
+  voiceUuid: string,
+  file: Express.Multer.File,
+) => {
+  await mkdir(VOICE_LIBRARY_DIRECTORY, { recursive: true });
+  const ext = extensionFromUpload(file);
+  const fileName = `${voiceUuid}.${ext}`;
+  const destination = path.join(VOICE_LIBRARY_DIRECTORY, fileName);
+  const temporary = path.join(VOICE_LIBRARY_DIRECTORY, `${fileName}.tmp`);
+  await writeFile(temporary, file.buffer, { flag: "w" });
+  await rename(temporary, destination);
+  return fileName;
+};
+
+export const getTtsVoiceAudioPath = (fileName: string) =>
+  path.join(VOICE_LIBRARY_DIRECTORY, path.basename(fileName));
+
+export const readTtsVoiceAudioBase64 = async (fileName: string) =>
+  (await readFile(getTtsVoiceAudioPath(fileName))).toString("base64");
+
+export const deleteTtsVoiceAudio = async (fileName: string | null) => {
+  if (!fileName) return;
+  await rm(getTtsVoiceAudioPath(fileName), { force: true });
+};
+
+export const serializeTtsVoice = (voice: any) => ({
+  voiceUuid: voice.voice_uuid,
+  name: voice.name,
+  language: voice.language,
+  description: voice.description ?? null,
+  originalFileName: voice.original_file_name ?? null,
+  audioMimeType: voice.audio_mime_type ?? null,
+  audioSizeBytes: voice.audio_size_bytes ?? null,
+  referenceText: voice.reference_text ?? null,
+  previewUrl: `/api/v1/tts/voices/${voice.voice_uuid}/audio`,
+  consentConfirmedAt: voice.consent_confirmed_at,
+  lastUsedAt: voice.last_used_at,
+  createdAt: voice.created_at,
+  updatedAt: voice.updated_at,
+});
 
 export const serializeTtsGeneration = (generation: any) => ({
   generationUuid: generation.generation_uuid,

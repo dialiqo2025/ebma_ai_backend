@@ -11,6 +11,12 @@ import {
 import { GenResObj } from "../../utils/responseFormat.util";
 import { HttpStatusCodes as Code } from "../../utils/httpType.util";
 import { customPricingRecipient } from "../../utils/email.util";
+import {
+  DEFAULT_RATE_PAIRS,
+  formatRateExample,
+  resolveRatesFromPlan,
+  roundCredits,
+} from "./billing.rates";
 
 export const BILLING_PRICES = {
   tts_characters: Number(process.env.BILLING_TTS_CREDITS_PER_CHARACTER ?? 0.03),
@@ -18,10 +24,10 @@ export const BILLING_PRICES = {
   llm_tokens: Number(process.env.BILLING_LLM_CREDITS_PER_TOKEN ?? 1),
 } as const;
 
-/** Default PAYG rates: ₹30 / 1000 TTS chars, ₹1 / STT minute. 1 credit = ₹1. */
+/** @deprecated Prefer DEFAULT_RATE_PAIRS / resolveRatesFromPlan. Kept for callers. */
 export const DEFAULT_PLAN_RATES = {
-  ttsCreditsPer1000Chars: 30,
-  sttCreditsPerMinute: 1,
+  ttsCreditsPer1000Chars: DEFAULT_RATE_PAIRS.tts.credits,
+  sttCreditsPerMinute: DEFAULT_RATE_PAIRS.stt.credits,
 } as const;
 
 const currentGlobalPrices = async () => {
@@ -36,9 +42,6 @@ export const getSignupFreeCredits = async () => {
   const [settings] = await db.select().from(BillingSettings).limit(1);
   return Number(settings?.signup_free_credits ?? 1000);
 };
-
-const formatCredits = (value: number) =>
-  Number.isInteger(value) ? String(value) : value.toFixed(2);
 
 export const ensureWallet = async (userUuid: string) => {
   const [existing] = await db
@@ -122,36 +125,25 @@ const resolvePlanUnitPrices = async (userUuid: string) => {
 const resolvePlanPrices = async (
   plan: Awaited<ReturnType<typeof getDefaultPaygPlan>>,
 ) => {
-  const global = await currentGlobalPrices();
-
-  const ttsPer1000 = Number(
-    plan?.tts_credits_per_1000_chars ?? DEFAULT_PLAN_RATES.ttsCreditsPer1000Chars,
-  );
-  const sttPerMinute = Number(
-    plan?.stt_credits_per_minute ?? DEFAULT_PLAN_RATES.sttCreditsPerMinute,
-  );
-  const llmPer1000 = Number(plan?.llm_credits_per_1000_tokens ?? global.llm_tokens * 1000);
+  const rates = resolveRatesFromPlan(plan);
+  // If LLM pair columns are empty and only global billing_rates exist, prefer global.
+  if (
+    plan &&
+    plan.llm_rate_credits == null &&
+    plan.llm_credits_per_1000_tokens == null
+  ) {
+    const global = await currentGlobalPrices();
+    rates.unitPrices.llm_tokens = global.llm_tokens;
+    rates.llmCreditsPer1000Tokens = roundCredits(global.llm_tokens * 1000);
+    rates.llm = {
+      credits: rates.llmCreditsPer1000Tokens,
+      tokens: 1000,
+    };
+  }
 
   return {
     plan,
-    ttsCreditsPer1000Chars: Number.isFinite(ttsPer1000)
-      ? ttsPer1000
-      : DEFAULT_PLAN_RATES.ttsCreditsPer1000Chars,
-    sttCreditsPerMinute: Number.isFinite(sttPerMinute)
-      ? sttPerMinute
-      : DEFAULT_PLAN_RATES.sttCreditsPerMinute,
-    /** Effective credits per character / second / token for ledger unit price. */
-    unitPrices: {
-      tts_characters:
-        (Number.isFinite(ttsPer1000)
-          ? ttsPer1000
-          : DEFAULT_PLAN_RATES.ttsCreditsPer1000Chars) / 1000,
-      stt_seconds:
-        (Number.isFinite(sttPerMinute)
-          ? sttPerMinute
-          : DEFAULT_PLAN_RATES.sttCreditsPerMinute) / 60,
-      llm_tokens: Number.isFinite(llmPer1000) ? llmPer1000 / 1000 : global.llm_tokens,
-    },
+    ...rates,
   };
 };
 
@@ -174,7 +166,10 @@ export const getPublicPricing = async () => {
     rates: {
       ttsCreditsPer1000Chars: rates.ttsCreditsPer1000Chars,
       sttCreditsPerMinute: rates.sttCreditsPerMinute,
-      llmCreditsPer1000Tokens: rates.unitPrices.llm_tokens * 1000,
+      llmCreditsPer1000Tokens: rates.llmCreditsPer1000Tokens,
+      tts: rates.tts,
+      stt: rates.stt,
+      llm: rates.llm,
     },
   });
 };
@@ -191,9 +186,10 @@ export const recordUsage = async (input: {
 }) => {
   if (!Number.isFinite(input.quantity) || input.quantity <= 0) return;
   try {
-    const { unitPrices, plan } = await resolvePlanUnitPrices(input.userUuid);
+    const resolved = await resolvePlanUnitPrices(input.userUuid);
+    const { unitPrices, plan } = resolved;
     const unitPrice = unitPrices[input.type];
-    const charged = input.quantity * unitPrice;
+    const charged = roundCredits(input.quantity * unitPrice);
     await ensureWallet(input.userUuid);
     const [inserted] = await db
       .insert(BillingUsageLedger)
@@ -211,6 +207,12 @@ export const recordUsage = async (input: {
           ...input.metadata,
           planUuid: plan?.plan_uuid ?? null,
           planCode: plan?.code ?? null,
+          ratePair:
+            input.type === "tts_characters"
+              ? resolved.tts
+              : input.type === "stt_seconds"
+                ? resolved.stt
+                : resolved.llm,
         },
       })
       .onConflictDoNothing({ target: BillingUsageLedger.idempotency_key })
@@ -240,9 +242,6 @@ export const getBillingSummary = async (userUuid: string) => {
     .from(BillingUsageLedger)
     .where(eq(BillingUsageLedger.user_uuid, userUuid));
 
-  const tts1000 = rates.ttsCreditsPer1000Chars;
-  const sttMin = rates.sttCreditsPerMinute;
-
   return GenResObj(Code.OK, true, "Billing summary fetched successfully", {
     balanceCredits: Math.max(0, Number(wallet?.balance_credits ?? 0)),
     balanceInr: Math.max(0, Number(wallet?.balance_credits ?? 0)),
@@ -256,25 +255,33 @@ export const getBillingSummary = async (userUuid: string) => {
           planUuid: rates.plan.plan_uuid,
           code: rates.plan.code,
           name: rates.plan.name,
-          ttsCreditsPer1000Chars: tts1000,
-          sttCreditsPerMinute: sttMin,
+          ttsCreditsPer1000Chars: rates.ttsCreditsPer1000Chars,
+          sttCreditsPerMinute: rates.sttCreditsPerMinute,
+          llmCreditsPer1000Tokens: rates.llmCreditsPer1000Tokens,
+          tts: rates.tts,
+          stt: rates.stt,
+          llm: rates.llm,
         }
       : null,
     pricing: {
       tts_characters: {
         unit: "character",
         creditsPerUnit: rates.unitPrices.tts_characters,
-        example: `1,000 characters = ₹${formatCredits(tts1000)} (${formatCredits(tts1000)} credits)`,
+        example: formatRateExample(rates.tts.credits, rates.tts.chars, "characters (TTS)"),
       },
       stt_seconds: {
         unit: "second",
         creditsPerUnit: rates.unitPrices.stt_seconds,
-        example: `1 minute = ₹${formatCredits(sttMin)} (${formatCredits(sttMin)} credits)`,
+        example: formatRateExample(
+          rates.stt.credits,
+          rates.stt.minutes,
+          rates.stt.minutes === 1 ? "minute (STT)" : "minutes (STT)",
+        ),
       },
       llm_tokens: {
         unit: "token",
         creditsPerUnit: rates.unitPrices.llm_tokens,
-        example: `1,000 tokens = ${formatCredits(1000 * rates.unitPrices.llm_tokens)} credits`,
+        example: formatRateExample(rates.llm.credits, rates.llm.tokens, "tokens (LLM)"),
       },
     },
   });

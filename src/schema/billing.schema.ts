@@ -14,12 +14,21 @@ export const BillingPlans = pgTable("billing_plans", {
   billing_interval: varchar("billing_interval", { length: 20 }).default("one_time").notNull(),
   plan_kind: varchar("plan_kind", { length: 20 }).default("service").notNull(),
   monthly_credits: numeric("monthly_credits", { precision: 18, scale: 6 }).default("0").notNull(),
-  /** Credits (₹) charged per 1000 TTS characters. 1 credit = ₹1. */
+  /** Legacy normalized rate: credits (₹) per 1000 TTS characters. Kept for rollback / display. */
   tts_credits_per_1000_chars: numeric("tts_credits_per_1000_chars", { precision: 18, scale: 6 }),
-  /** Credits (₹) charged per 1 minute of STT audio. 1 credit = ₹1. */
+  /** Legacy normalized rate: credits (₹) per 1 minute of STT. Kept for rollback / display. */
   stt_credits_per_minute: numeric("stt_credits_per_minute", { precision: 18, scale: 6 }),
-  /** Credits (₹) charged per 1,000 LLM tokens. 1 credit = ₹1. */
+  /** Legacy normalized rate: credits (₹) per 1,000 LLM tokens. Kept for rollback / display. */
   llm_credits_per_1000_tokens: numeric("llm_credits_per_1000_tokens", { precision: 18, scale: 6 }),
+  /** Source-of-truth TTS rule: charge `tts_rate_credits` per `tts_rate_chars` characters. */
+  tts_rate_credits: numeric("tts_rate_credits", { precision: 18, scale: 6 }),
+  tts_rate_chars: numeric("tts_rate_chars", { precision: 18, scale: 6 }),
+  /** Source-of-truth STT rule: charge `stt_rate_credits` per `stt_rate_minutes` minutes. */
+  stt_rate_credits: numeric("stt_rate_credits", { precision: 18, scale: 6 }),
+  stt_rate_minutes: numeric("stt_rate_minutes", { precision: 18, scale: 6 }),
+  /** Source-of-truth LLM rule: charge `llm_rate_credits` per `llm_rate_tokens` tokens. */
+  llm_rate_credits: numeric("llm_rate_credits", { precision: 18, scale: 6 }),
+  llm_rate_tokens: numeric("llm_rate_tokens", { precision: 18, scale: 6 }),
   /** When true, new users are auto-assigned this plan (PAYG). */
   is_default: boolean("is_default").default(false).notNull(),
   /** Marketing-only tier (Contact us); not purchasable and not assignable. */

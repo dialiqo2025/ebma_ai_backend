@@ -12,11 +12,26 @@ import {
   Users,
 } from "../../schema";
 import { ensureDefaultPaygSubscription, ensureWallet, getSignupFreeCredits } from "./billing.provider";
+import { buildRateColumnValues, resolveRatesFromPlan } from "./billing.rates";
 import { paymentProviderCapabilities } from "./payment-providers.config";
 import { GenResObj } from "../../utils/responseFormat.util";
 import { HttpStatusCodes as Code } from "../../utils/httpType.util";
 
 const defaultRates = { tts_characters: 0.03, stt_seconds: 1 / 60, llm_tokens: 1 } as const;
+
+type PlanRateWriteFields = {
+  /** Preferred: exact rule from superadmin (e.g. 25 credits / 10000 chars). */
+  ttsRateCredits?: number | null;
+  ttsRateChars?: number | null;
+  sttRateCredits?: number | null;
+  sttRateMinutes?: number | null;
+  llmRateCredits?: number | null;
+  llmRateTokens?: number | null;
+  /** Legacy normalized fields — still accepted; synced into pair columns when pair omitted. */
+  ttsCreditsPer1000Chars?: number | null;
+  sttCreditsPerMinute?: number | null;
+  llmCreditsPer1000Tokens?: number | null;
+};
 
 type PlanWriteInput = {
   code: string;
@@ -30,20 +45,24 @@ type PlanWriteInput = {
   active?: boolean;
   features?: { stt: boolean; tts: boolean; llm: boolean };
   benefits?: string[];
-  ttsCreditsPer1000Chars?: number | null;
-  sttCreditsPerMinute?: number | null;
-  llmCreditsPer1000Tokens?: number | null;
   isDefault?: boolean;
   contactOnly?: boolean;
   /** false = private enterprise plan (hidden from Pricing, assignable by superadmin) */
   isPublic?: boolean;
-};
+} & PlanRateWriteFields;
 
-const normalizeRate = (value: number | null | undefined) => {
-  if (value === null || value === undefined) return null;
-  if (!Number.isFinite(value) || value < 0) return null;
-  return value.toFixed(6);
-};
+const hasAnyRateField = (input: PlanRateWriteFields) =>
+  [
+    input.ttsRateCredits,
+    input.ttsRateChars,
+    input.sttRateCredits,
+    input.sttRateMinutes,
+    input.llmRateCredits,
+    input.llmRateTokens,
+    input.ttsCreditsPer1000Chars,
+    input.sttCreditsPerMinute,
+    input.llmCreditsPer1000Tokens,
+  ].some((value) => value !== undefined);
 
 export const listPlans = async (includeInactive = true) => {
   const rows = await db
@@ -71,6 +90,15 @@ export const createPlan = async (input: PlanWriteInput) => {
       .where(eq(BillingPlans.is_default, true));
   }
 
+  const planKind =
+    input.planKind || (code.startsWith("wallet_") ? "wallet_topup" : "service");
+  const skipUsageRates = contactOnly || planKind === "wallet_topup";
+  const rateColumns = skipUsageRates
+    ? hasAnyRateField(input)
+      ? buildRateColumnValues(input)
+      : {}
+    : buildRateColumnValues(hasAnyRateField(input) ? input : {});
+
   const [plan] = await db
     .insert(BillingPlans)
     .values({
@@ -80,12 +108,9 @@ export const createPlan = async (input: PlanWriteInput) => {
       price_minor: input.priceMinor,
       currency: (input.currency || "INR").toUpperCase(),
       billing_interval: input.billingInterval || "one_time",
-      plan_kind:
-        input.planKind || (code.startsWith("wallet_") ? "wallet_topup" : "service"),
+      plan_kind: planKind,
       monthly_credits: input.credits.toFixed(6),
-      tts_credits_per_1000_chars: normalizeRate(input.ttsCreditsPer1000Chars),
-      stt_credits_per_minute: normalizeRate(input.sttCreditsPerMinute),
-      llm_credits_per_1000_tokens: normalizeRate(input.llmCreditsPer1000Tokens),
+      ...rateColumns,
       is_default: isDefault && !contactOnly,
       contact_only: contactOnly,
       is_public: resolvedPublic,
@@ -99,24 +124,23 @@ export const createPlan = async (input: PlanWriteInput) => {
 
 export const updatePlan = async (
   planUuid: string,
-  input: Partial<{
-    name: string;
-    description: string;
-    priceMinor: number;
-    currency: string;
-    billingInterval: string;
-    planKind: "service" | "wallet_topup";
-    credits: number;
-    active: boolean;
-    features: { stt: boolean; tts: boolean; llm: boolean };
-    benefits: string[];
-    ttsCreditsPer1000Chars: number | null;
-    sttCreditsPerMinute: number | null;
-    llmCreditsPer1000Tokens: number | null;
-    isDefault: boolean;
-    contactOnly: boolean;
-    isPublic: boolean;
-  }>,
+  input: Partial<
+    {
+      name: string;
+      description: string;
+      priceMinor: number;
+      currency: string;
+      billingInterval: string;
+      planKind: "service" | "wallet_topup";
+      credits: number;
+      active: boolean;
+      features: { stt: boolean; tts: boolean; llm: boolean };
+      benefits: string[];
+      isDefault: boolean;
+      contactOnly: boolean;
+      isPublic: boolean;
+    } & PlanRateWriteFields
+  >,
 ) => {
   if (input.isDefault === true) {
     await db
@@ -124,6 +148,17 @@ export const updatePlan = async (
       .set({ is_default: false, updated_at: new Date() })
       .where(eq(BillingPlans.is_default, true));
   }
+
+  const [existing] = hasAnyRateField(input)
+    ? await db
+        .select()
+        .from(BillingPlans)
+        .where(eq(BillingPlans.plan_uuid, planUuid))
+        .limit(1)
+    : [null];
+  const rateColumns = hasAnyRateField(input)
+    ? buildRateColumnValues(input, existing)
+    : null;
 
   const [plan] = await db
     .update(BillingPlans)
@@ -143,15 +178,7 @@ export const updatePlan = async (
       ...(input.credits !== undefined
         ? { monthly_credits: input.credits.toFixed(6) }
         : {}),
-      ...(input.ttsCreditsPer1000Chars !== undefined
-        ? { tts_credits_per_1000_chars: normalizeRate(input.ttsCreditsPer1000Chars) }
-        : {}),
-      ...(input.sttCreditsPerMinute !== undefined
-        ? { stt_credits_per_minute: normalizeRate(input.sttCreditsPerMinute) }
-        : {}),
-      ...(input.llmCreditsPer1000Tokens !== undefined
-        ? { llm_credits_per_1000_tokens: normalizeRate(input.llmCreditsPer1000Tokens) }
-        : {}),
+      ...(rateColumns ?? {}),
       ...(input.isDefault !== undefined
         ? { is_default: Boolean(input.isDefault) && input.contactOnly !== true }
         : {}),
@@ -647,19 +674,18 @@ export const getUserCapabilities = async (userUuid: string) => {
       llm: true,
       llmMode: "user",
     },
-    rates: plan
-      ? {
-          ttsCreditsPer1000Chars: Number(plan.tts_credits_per_1000_chars ?? 30),
-          sttCreditsPerMinute: Number(plan.stt_credits_per_minute ?? 1),
-          llmCreditsPer1000Tokens: Number(plan.llm_credits_per_1000_tokens ?? 1),
-          creditToInr: 1,
-        }
-      : {
-          ttsCreditsPer1000Chars: 30,
-          sttCreditsPerMinute: 1,
-          llmCreditsPer1000Tokens: 1,
-          creditToInr: 1,
-        },
+    rates: (() => {
+      const resolved = resolveRatesFromPlan(plan);
+      return {
+        ttsCreditsPer1000Chars: resolved.ttsCreditsPer1000Chars,
+        sttCreditsPerMinute: resolved.sttCreditsPerMinute,
+        llmCreditsPer1000Tokens: resolved.llmCreditsPer1000Tokens,
+        tts: resolved.tts,
+        stt: resolved.stt,
+        llm: resolved.llm,
+        creditToInr: 1,
+      };
+    })(),
     paymentProviders: paymentProviderCapabilities(),
   });
 };

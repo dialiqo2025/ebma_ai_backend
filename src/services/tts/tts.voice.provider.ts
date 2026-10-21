@@ -110,21 +110,58 @@ export const getTtsVoice = async (voiceUuid: string, userUuid: string) => {
     : GenResObj(Code.NOT_FOUND, false, "Voice not found");
 };
 
-export const updateTtsVoice = async (voiceUuid: string, userUuid: string, payload: UpdateTtsVoice) => {
-  const [voice] = await db
-    .update(TtsVoices)
-    .set({
-      ...(payload.name !== undefined ? { name: payload.name } : {}),
-      ...(payload.language !== undefined ? { language: payload.language } : {}),
-      ...(payload.description !== undefined ? { description: payload.description } : {}),
-      ...(payload.referenceText !== undefined ? { reference_text: payload.referenceText } : {}),
-      updated_at: new Date(),
-    })
-    .where(and(eq(TtsVoices.voice_uuid, voiceUuid), eq(TtsVoices.user_uuid, userUuid)))
-    .returning();
-  return voice
-    ? GenResObj(Code.OK, true, "Voice updated", serializeTtsVoice(voice))
-    : GenResObj(Code.NOT_FOUND, false, "Voice not found");
+export const updateTtsVoice = async (
+  voiceUuid: string,
+  userUuid: string,
+  payload: UpdateTtsVoice,
+  voiceSample?: Express.Multer.File,
+) => {
+  const existing = await findOwnedVoice(voiceUuid, userUuid);
+  if (!existing) return GenResObj(Code.NOT_FOUND, false, "Voice not found");
+
+  if (voiceSample && payload.consentAccepted !== true) {
+    return GenResObj(Code.BAD_REQUEST, false, "Voice consent is required to replace the reference audio");
+  }
+  if (voiceSample && !isAllowedTtsReferenceSample(voiceSample)) {
+    return GenResObj(Code.UNSUPPORTED_MEDIA_TYPE, false, "Voice sample must be WAV, MP3, FLAC, OGG, WebM, or M4A");
+  }
+  if (voiceSample && voiceSample.size > ttsCloneSampleMaxBytes()) {
+    return GenResObj(Code.REQUEST_TOO_LONG, false, "Voice sample exceeds the configured size limit");
+  }
+
+  let replacementFileName: string | null = null;
+  try {
+    if (voiceSample) {
+      replacementFileName = await saveTtsVoiceAudio(`${voiceUuid}-${randomUUID()}`, voiceSample);
+    }
+    const [voice] = await db
+      .update(TtsVoices)
+      .set({
+        ...(payload.name !== undefined ? { name: payload.name } : {}),
+        ...(payload.language !== undefined ? { language: payload.language } : {}),
+        ...(payload.description !== undefined ? { description: payload.description } : {}),
+        ...(payload.referenceText !== undefined ? { reference_text: payload.referenceText } : {}),
+        ...(voiceSample && replacementFileName ? {
+          reference_audio_file_name: replacementFileName,
+          original_file_name: path.basename(voiceSample.originalname || "voice-sample"),
+          audio_mime_type: voiceSample.mimetype || "application/octet-stream",
+          audio_size_bytes: voiceSample.size,
+          consent_confirmed_at: new Date(),
+        } : {}),
+        updated_at: new Date(),
+      })
+      .where(and(eq(TtsVoices.voice_uuid, voiceUuid), eq(TtsVoices.user_uuid, userUuid)))
+      .returning();
+    if (!voice) {
+      if (replacementFileName) await deleteTtsVoiceAudio(replacementFileName);
+      return GenResObj(Code.NOT_FOUND, false, "Voice not found");
+    }
+    if (replacementFileName) await deleteTtsVoiceAudio(existing.reference_audio_file_name);
+    return GenResObj(Code.OK, true, "Voice updated", serializeTtsVoice(voice));
+  } catch (error) {
+    if (replacementFileName) await deleteTtsVoiceAudio(replacementFileName);
+    throw error;
+  }
 };
 
 export const deleteTtsVoice = async (voiceUuid: string, userUuid: string) => {

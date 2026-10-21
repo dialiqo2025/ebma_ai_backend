@@ -30,7 +30,7 @@ export const TtsVoiceController = {
   },
   update: async (req: Request, res: Response, next: NextFunction) => {
     try {
-      send(res, await VoiceProvider.updateTtsVoice(ttsVoiceUuidValidator.parse(req.params.voice_uuid), userUuid(req), updateTtsVoiceValidator.parse(req.body)));
+      send(res, await VoiceProvider.updateTtsVoice(ttsVoiceUuidValidator.parse(req.params.voice_uuid), userUuid(req), updateTtsVoiceValidator.parse(req.body), req.file));
     } catch (error) { next(error); }
   },
   remove: async (req: Request, res: Response, next: NextFunction) => {

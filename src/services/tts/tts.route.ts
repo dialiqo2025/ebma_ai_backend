@@ -18,7 +18,15 @@ router.post("/voices", authenticated, (req, res, next) => {
 }, TtsVoiceController.create);
 router.get("/voices", authenticated, TtsVoiceController.list);
 router.get("/voices/:voice_uuid", authenticated, TtsVoiceController.get);
-router.patch("/voices/:voice_uuid", authenticated, TtsVoiceController.update);
+router.patch("/voices/:voice_uuid", authenticated, (req, res, next) => {
+  ttsVoiceSampleUpload(req, res, (uploadError) => {
+    if (uploadError) {
+      res.status(413).json({ success: false, message: "Voice sample exceeds the upload size limit", data: null });
+      return;
+    }
+    next();
+  });
+}, TtsVoiceController.update);
 router.delete("/voices/:voice_uuid", authenticated, TtsVoiceController.remove);
 router.get("/voices/:voice_uuid/audio", authenticated, TtsVoiceController.audio);
 

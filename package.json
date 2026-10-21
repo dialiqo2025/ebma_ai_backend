@@ -8,6 +8,8 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
+    "report:new-users": "node dist/jobs/daily-new-users-report.js",
+    "report:new-users:dev": "tsx src/jobs/daily-new-users-report.ts",
     "generate": "drizzle-kit generate",
     "migrate": "drizzle-kit migrate"
   },

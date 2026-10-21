@@ -2,6 +2,36 @@
 
 Express and PostgreSQL management API for the EBMA AI web application.
 
+## Daily new-user CSV report
+
+The backend includes a one-shot job that emails a CSV containing accounts created during
+the previous local calendar day, together with profile, plan, wallet, and TTS/STT/LLM usage
+totals for that same window.
+
+```bash
+npm run build
+npm run report:new-users
+```
+
+For a controlled backfill or test, run the source job with an explicit local report date:
+
+```bash
+npm run report:new-users:dev -- --date=2026-10-20
+```
+
+Run `npm run migrate` before enabling the job. Configure
+`DAILY_USER_REPORT_TO_EMAIL` (or let it fall back to `CUSTOM_PRICING_TO_EMAIL`),
+`DAILY_USER_REPORT_TIMEZONE` (default `Asia/Kolkata`), and
+`DAILY_USER_REPORT_SEND_EMPTY` (default `false`). The job records one durable execution per
+report date and safely retries failed runs or processing runs that have been stale for an hour.
+
+Use a platform scheduler instead of starting a timer in the API process. Render schedules
+cron expressions in UTC, so midnight in Asia/Kolkata is `30 18 * * *`. The cron command is:
+
+```bash
+npm run report:new-users
+```
+
 ## TTS API
 
 All TTS routes require the JWT access token returned by the auth flow:

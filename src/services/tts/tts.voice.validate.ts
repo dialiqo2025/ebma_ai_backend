@@ -32,6 +32,10 @@ export const updateTtsVoiceValidator = z
     language: language.optional(),
     description: z.string().trim().max(280).nullable().optional(),
     referenceText: z.string().trim().max(2000).nullable().optional(),
+    consentAccepted: z.preprocess(
+      (value) => value === "true" ? true : value,
+      z.literal(true, { message: "Voice consent is required" }).optional(),
+    ),
   })
   .strict()
   .refine((value) => Object.keys(value).length > 0, "At least one field is required");

@@ -169,6 +169,44 @@ export const renderEbmaContactInquiryEmail = (params: {
     `New ${params.inquiryType} inquiry from ${params.fullName} at ${params.company}.`,
   );
 
+export const renderDailyNewUsersReportEmail = (params: {
+  reportDate: string;
+  timezone: string;
+  userCount: number;
+}) =>
+  emailShell(
+    `${eyebrow("Daily account report")}
+     <h1 style="margin:22px 0 12px;color:#1D1B2E;font-family:'Space Grotesk',Inter,'Segoe UI',Arial,sans-serif;font-size:31px;line-height:39px;letter-spacing:-.8px;">New user registrations</h1>
+     <p style="margin:0;color:#667085;font-size:14px;line-height:23px;">The attached CSV contains ${params.userCount} new ${params.userCount === 1 ? "account" : "accounts"} registered on ${escapeHtml(params.reportDate)} (${escapeHtml(params.timezone)}), together with profile, plan, wallet, and usage totals for the reporting window.</p>
+     <div style="margin-top:26px;padding:20px;border:1px solid #DDD6F5;border-radius:16px;background:#F8F7FF;">
+       <div style="color:#6542E8;font-size:10px;font-weight:800;letter-spacing:1.1px;text-transform:uppercase;">Registrations</div>
+       <div style="margin-top:8px;color:#1D1B2E;font-size:30px;font-weight:800;">${params.userCount}</div>
+     </div>
+     <div style="margin-top:22px;color:#8B849C;font-size:12px;line-height:19px;">This report contains private account information. Store and share it only with authorized recipients.</div>`,
+    `${params.userCount} new user registrations for ${params.reportDate}.`,
+  );
+
+const resendAttachments = (attachments: Mail.Attachment[] | undefined) =>
+  attachments?.map((attachment) => {
+    if (!attachment.filename) throw new Error("Resend attachments require a filename");
+    if (attachment.content === undefined || attachment.content === null) {
+      throw new Error(`Resend attachment ${attachment.filename} requires in-memory content`);
+    }
+    if (!Buffer.isBuffer(attachment.content) && typeof attachment.content !== "string") {
+      throw new Error(`Resend attachment ${attachment.filename} must use Buffer or string content`);
+    }
+    const content = Buffer.isBuffer(attachment.content)
+      ? attachment.content.toString("base64")
+      : Buffer.from(attachment.content).toString("base64");
+    return {
+      filename: attachment.filename,
+      content,
+      ...(typeof attachment.contentType === "string"
+        ? { content_type: attachment.contentType }
+        : {}),
+    };
+  });
+
 export const sendEmail = async (params: {
   to: string;
   subject: string;
@@ -176,6 +214,7 @@ export const sendEmail = async (params: {
   text?: string;
   replyTo?: string;
   attachments?: Mail.Attachment[];
+  idempotencyKey?: string;
 }) => {
   const provider = emailDeliveryProvider();
   if (provider === "resend") {
@@ -184,10 +223,6 @@ export const sendEmail = async (params: {
     if (!apiKey || !from) {
       throw new Error("RESEND_API_KEY and RESEND_FROM must be configured");
     }
-    if (params.attachments?.length) {
-      throw new Error("Attachments are not configured for the Resend email provider");
-    }
-
     const controller = new AbortController();
     const timeout = setTimeout(
       () => controller.abort(),
@@ -200,6 +235,7 @@ export const sendEmail = async (params: {
         headers: {
           Authorization: `Bearer ${apiKey}`,
           "Content-Type": "application/json",
+          ...(params.idempotencyKey ? { "Idempotency-Key": params.idempotencyKey } : {}),
         },
         body: JSON.stringify({
           from,
@@ -208,6 +244,7 @@ export const sendEmail = async (params: {
           subject: params.subject,
           text: params.text,
           html: params.html,
+          attachments: resendAttachments(params.attachments),
         }),
         signal: controller.signal,
       });
@@ -220,7 +257,7 @@ export const sendEmail = async (params: {
           `Resend delivery failed (${response.status}): ${result?.message || result?.name || "Unknown provider response"}`,
         );
       }
-      return;
+      return { provider: "resend" as const, messageId: result?.id ?? null };
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") {
         throw new Error("Email provider request timed out");
@@ -250,7 +287,7 @@ export const sendEmail = async (params: {
     socketTimeout: positiveInteger(process.env.EMAIL_TIMEOUT_MS, 15_000),
   });
 
-  await transporter.sendMail({
+  const info = await transporter.sendMail({
     from: process.env.SMTP_FROM || smtpUser,
     to: params.to,
     replyTo: params.replyTo,
@@ -259,4 +296,5 @@ export const sendEmail = async (params: {
     html: params.html,
     attachments: params.attachments,
   });
+  return { provider: "smtp" as const, messageId: info.messageId || null };
 };

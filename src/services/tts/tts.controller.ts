@@ -19,6 +19,14 @@ export const TtsController = {
     sendProviderResponse(res, TtsProvider.getTtsOptions());
   },
 
+  health: async (_req: Request, res: Response, next: NextFunction) => {
+    try {
+      sendProviderResponse(res, await TtsProvider.getTtsHealth());
+    } catch (error) {
+      next(error);
+    }
+  },
+
   create: async (req: Request, res: Response, next: NextFunction) => {
     try {
       const payload = createTtsGenerationValidator.parse(req.body);

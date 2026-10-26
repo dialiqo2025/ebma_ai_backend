@@ -97,6 +97,62 @@ const buildModelHeaders = () => {
 };
 
 /**
+ * Check whether the configured TTS processor is reachable without generating
+ * billable audio. An explicit health URL is preferred; otherwise OPTIONS on
+ * the synthesis endpoint is used as a lightweight reachability probe. A 405
+ * from that fallback still proves that the GPU application is running.
+ */
+export const getTtsModelHealth = async () => {
+  const modelEndpoint = process.env.TTS_MODEL_ENDPOINT?.trim();
+  if (!modelEndpoint) {
+    throw new TtsModelError(
+      "Text-to-speech processing is not configured",
+      "model_not_configured",
+      503,
+    );
+  }
+
+  const configuredHealthEndpoint = process.env.TTS_MODEL_HEALTH_ENDPOINT?.trim();
+  const endpoint = configuredHealthEndpoint || modelEndpoint;
+
+  let response: Response;
+  try {
+    response = await fetch(endpoint, {
+      method: configuredHealthEndpoint ? "GET" : "OPTIONS",
+      headers: buildModelHeaders(),
+      signal: AbortSignal.timeout(
+        positiveIntegerFromEnvironment("TTS_MODEL_HEALTH_TIMEOUT_MS", 10_000),
+      ),
+    });
+  } catch {
+    throw new TtsModelError(
+      "Text-to-speech processing is temporarily unavailable. Please try again later or contact your administrator.",
+      "model_unavailable",
+      503,
+    );
+  }
+
+  const fallbackProbeIsReachable =
+    !configuredHealthEndpoint &&
+    response.status < 500 &&
+    ![401, 403, 404].includes(response.status);
+
+  if (!response.ok && !fallbackProbeIsReachable) {
+    console.error("TTS model health check failed", {
+      status: response.status,
+      url: endpoint,
+    });
+    throw new TtsModelError(
+      "Text-to-speech processing is temporarily unavailable. Please try again later or contact your administrator.",
+      "model_unavailable",
+      503,
+    );
+  }
+
+  return { status: "ok" as const };
+};
+
+/**
  * Payload for GPU `POST /tts/v1/audio/speech`.
  * Clone curl shape:
  * `{ input, stream, temperature, top_k, reference: { audio_base64, text } }`
@@ -123,6 +179,17 @@ const parseUpstreamError = async (response: Response) => {
   const responseText = (await response.text()).slice(0, 500);
   console.error("TTS model request failed", response.status, responseText);
 
+  // A stopped GPU or a misrouted GPU service commonly responds with its own
+  // plain-text 404/405 page. Keep those infrastructure details in server logs,
+  // but expose a stable service-availability error to API consumers.
+  if (response.status === 404 || response.status === 405) {
+    throw new TtsModelError(
+      "Text-to-speech processing is temporarily unavailable. Please try again later or contact your administrator.",
+      "model_unavailable",
+      503,
+    );
+  }
+
   let detail = "";
   try {
     const payload = JSON.parse(responseText);
@@ -136,13 +203,9 @@ const parseUpstreamError = async (response: Response) => {
   }
 
   const hint =
-    response.status === 404
-      ? " (endpoint not found — use /tts/v1/audio/speech)"
-      : response.status === 405
-        ? " (method not allowed — this URL likely is not the POST synthesize route)"
-        : response.status === 401 || response.status === 403
-          ? " (authentication failed — check TTS_MODEL_API_KEY)"
-          : "";
+    response.status === 401 || response.status === 403
+      ? " (authentication failed — check TTS_MODEL_API_KEY)"
+      : "";
 
   throw new TtsModelError(
     detail

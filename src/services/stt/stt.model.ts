@@ -80,7 +80,10 @@ const modelFetch = async (
   }
 };
 
-const modelErrorFromResponse = async (response: Response) => {
+const modelErrorFromResponse = async (
+  response: Response,
+  options: { endpointNotFoundMeansUnavailable?: boolean } = {},
+) => {
   let upstreamCode: string | undefined;
   let upstreamMessage: string | undefined;
   try {
@@ -141,6 +144,13 @@ const modelErrorFromResponse = async (response: Response) => {
   }
 
   if (response.status === 404) {
+    if (options.endpointNotFoundMeansUnavailable) {
+      return new SttModelError(
+        "Speech-to-text processing is temporarily unavailable. Please try again later or contact your administrator.",
+        "model_unavailable",
+        503,
+      );
+    }
     return new SttModelError(
       upstreamMessage || "The EBMA ASR resource was not found",
       "model_not_found",
@@ -180,7 +190,11 @@ export const requestSttBrowserToken = async (input: {
     }),
   });
 
-  if (!response.ok) throw await modelErrorFromResponse(response);
+  if (!response.ok) {
+    throw await modelErrorFromResponse(response, {
+      endpointNotFoundMeansUnavailable: true,
+    });
+  }
 
   try {
     return tokenResponseValidator.parse(await response.json());
@@ -195,7 +209,11 @@ export const requestSttBrowserToken = async (input: {
 
 export const getSttModelHealth = async () => {
   const response = await modelFetch("/health", { method: "GET" });
-  if (!response.ok) throw await modelErrorFromResponse(response);
+  if (!response.ok) {
+    throw await modelErrorFromResponse(response, {
+      endpointNotFoundMeansUnavailable: true,
+    });
+  }
 
   try {
     return healthResponseValidator.parse(await response.json());
@@ -243,7 +261,11 @@ export const createTranscriptionJob = async (input: CreateTranscriptionJobInput)
     uploadTimeoutMs(),
   );
 
-  if (!response.ok) throw await modelErrorFromResponse(response);
+  if (!response.ok) {
+    throw await modelErrorFromResponse(response, {
+      endpointNotFoundMeansUnavailable: true,
+    });
+  }
 
   try {
     return jobCreatedValidator.parse(await response.json());

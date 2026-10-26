@@ -5,7 +5,8 @@ ALTER TABLE "billing_plans" ADD COLUMN IF NOT EXISTS "stt_rate_minutes" numeric(
 ALTER TABLE "billing_plans" ADD COLUMN IF NOT EXISTS "llm_rate_credits" numeric(18, 6);--> statement-breakpoint
 ALTER TABLE "billing_plans" ADD COLUMN IF NOT EXISTS "llm_rate_tokens" numeric(18, 6);--> statement-breakpoint
 
--- Backfill pairs from legacy normalized columns (do not drop legacy columns).
+-- Preserve existing plan pricing when migrating from the legacy normalized
+-- rate columns.
 UPDATE "billing_plans"
 SET
   "tts_rate_credits" = COALESCE("tts_rate_credits", "tts_credits_per_1000_chars", '30'),

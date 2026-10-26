@@ -21,6 +21,7 @@ import {
   wrapPcmS16leAsWav,
 } from "./tts.helper";
 import {
+  getTtsModelHealth,
   openTtsModelStream,
   synthesizeWithTtsModel,
   TtsModelError,
@@ -829,3 +830,22 @@ export const getTtsOptions = () =>
       channels: Number(process.env.TTS_STREAM_CHANNELS) || 1,
     },
   });
+
+export const getTtsHealth = async () => {
+  try {
+    const health = await getTtsModelHealth();
+    return GenResObj(Code.OK, true, "TTS processing service is healthy", health);
+  } catch (error) {
+    const modelError =
+      error instanceof TtsModelError
+        ? error
+        : new TtsModelError(
+            "Text-to-speech processing is temporarily unavailable. Please try again later or contact your administrator.",
+            "model_unavailable",
+            503,
+          );
+    return GenResObj(modelError.httpStatus, false, modelError.message, {
+      error: { code: modelError.code, message: modelError.message },
+    });
+  }
+};

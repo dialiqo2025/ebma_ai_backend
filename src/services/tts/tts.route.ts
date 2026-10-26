@@ -31,6 +31,7 @@ router.delete("/voices/:voice_uuid", authenticated, TtsVoiceController.remove);
 router.get("/voices/:voice_uuid/audio", authenticated, TtsVoiceController.audio);
 
 router.get("/options", authenticated, TtsController.options);
+router.get("/health", authenticated, TtsController.health);
 router.post(
   "/generations",
   authenticated,

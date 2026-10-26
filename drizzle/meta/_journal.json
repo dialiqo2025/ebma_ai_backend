@@ -239,6 +239,13 @@
       "when": 1792571897322,
       "tag": "0033_hot_wasp",
       "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1792747964601,
+      "tag": "0034_oval_venus",
+      "breakpoints": true
     }
   ]
 }

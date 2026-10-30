@@ -1,5 +1,6 @@
 export const STT_LANGUAGES = [
   { code: "auto", name: "Automatic detection" },
+  { code: "ar", name: "Arabic (MSA + dialects)" },
   { code: "hi", name: "Hindi" },
   { code: "bn", name: "Bengali" },
   { code: "ta", name: "Tamil" },
@@ -28,6 +29,13 @@ export const STT_LANGUAGES = [
   { code: "bhb", name: "Bhili" },
   { code: "en", name: "English (Indian)" },
 ] as const;
+
+export const ARABIC_STT_LANGUAGE = {
+  code: "ar",
+  name: "Arabic (MSA + dialects)",
+} as const;
+
+export const INDIC_STT_LANGUAGES = STT_LANGUAGES;
 
 export const isSttModelConfigured = () =>
   Boolean(
@@ -70,14 +78,23 @@ export const serializeSttSession = (session: any, segments?: any[]) => ({
   ...(segments ? { segments: segments.map(serializeSttSegment) } : {}),
 });
 
-export const toSttStartMessage = (session: any) => ({
-  type: "start" as const,
-  sample_rate: session.sample_rate,
-  lang: session.language,
-  mode: session.output_mode,
-  end_silence_ms: session.end_silence_ms,
-  partials: session.partials,
-});
+export const toSttStartMessage = (session: any) => {
+  // Arabic ASR only accepts type + sample_rate (different protocol from Indic).
+  if (session.language === "ar") {
+    return {
+      type: "start" as const,
+      sample_rate: session.sample_rate,
+    };
+  }
+  return {
+    type: "start" as const,
+    sample_rate: session.sample_rate,
+    lang: session.language,
+    mode: session.output_mode,
+    end_silence_ms: session.end_silence_ms,
+    partials: session.partials,
+  };
+};
 
 export const mapProviderTranscriptionStatus = (
   status: unknown,

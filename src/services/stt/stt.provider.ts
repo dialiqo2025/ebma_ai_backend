@@ -6,13 +6,25 @@ import { GenResObj } from "../../utils/responseFormat.util";
 import { prepareTextForTts } from "../llm/llm.provider";
 import { recordUsage } from "../billing/billing.provider";
 import {
+  buildArabicWsUrlBase,
+  checkArabicAvailability,
+  isArabicSttLanguage,
+} from "./stt.arabic";
+import {
+  decodeAudioToPcm16kMono,
+  isArabicWsJobId,
+  newArabicWsJobId,
+  transcribeArabicFileOverWs,
+} from "./stt.arabic-file";
+import {
+  ARABIC_STT_LANGUAGE,
+  INDIC_STT_LANGUAGES,
   isSttModelConfigured,
   mapProviderTranscriptionStatus,
   maxUploadBytes,
   serializeSttSegment,
   serializeSttSession,
   serializeSttTranscription,
-  STT_LANGUAGES,
   toSttStartMessage,
 } from "./stt.helper";
 import {
@@ -51,6 +63,18 @@ const findOwnedSession = async (sessionUuid: string, userUuid: string) => {
 };
 
 export const createSttSession = async (userUuid: string, payload: CreateSttSession, projectUuid?: string, apiKeyUuid?: string) => {
+  // Soft gate only when the user actually picks Arabic.
+  if (isArabicSttLanguage(payload.language)) {
+    const arabic = await checkArabicAvailability();
+    if (!arabic.available) {
+      return GenResObj(
+        Code.SERVICE_UNAVAILABLE,
+        false,
+        arabic.reason || "Arabic transcription is currently unavailable",
+      );
+    }
+  }
+
   const [session] = await db
     .insert(SttSessions)
     .values({
@@ -59,7 +83,7 @@ export const createSttSession = async (userUuid: string, payload: CreateSttSessi
       api_key_uuid: apiKeyUuid ?? null,
       language: payload.language,
       output_mode: payload.mode,
-      sample_rate: payload.sampleRate,
+      sample_rate: isArabicSttLanguage(payload.language) ? 16000 : payload.sampleRate,
       end_silence_ms: payload.endSilenceMs,
       partials: payload.partials,
     })
@@ -74,6 +98,7 @@ export const createSttSession = async (userUuid: string, payload: CreateSttSessi
     {
       ...serializeSttSession(session),
       startMessage: toSttStartMessage(session),
+      protocol: isArabicSttLanguage(session.language) ? "arabic" : "indic",
     },
   );
 };
@@ -283,10 +308,22 @@ export const createSttBrowserToken = async (
   }
 
   try {
+    if (isArabicSttLanguage(session.language)) {
+      const arabic = await checkArabicAvailability();
+      if (!arabic.available) {
+        return GenResObj(
+          Code.SERVICE_UNAVAILABLE,
+          false,
+          arabic.reason || "Arabic transcription is currently unavailable",
+        );
+      }
+    }
+
     const token = await requestSttBrowserToken({
       subject: userUuid,
       ttlSeconds: payload.ttlSeconds,
-      language: session.language,
+      // Arabic token call is the same; lang is optional for Indic only.
+      language: isArabicSttLanguage(session.language) ? "auto" : session.language,
     });
 
     const [updated] = await db
@@ -308,15 +345,20 @@ export const createSttBrowserToken = async (
 
     if (!updated) throw new Error("STT session token update failed");
 
+    const wsUrl = isArabicSttLanguage(session.language)
+      ? buildArabicWsUrlBase()
+      : token.ws_url;
+
     return GenResObj(Code.OK, true, "STT browser token created successfully", {
       session: serializeSttSession(updated),
       connection: {
         token: token.token,
-        wsUrl: token.ws_url,
+        wsUrl,
         expiresIn: token.expires_in,
         expiresAt: token.expires_at,
       },
       startMessage: toSttStartMessage(updated),
+      protocol: isArabicSttLanguage(session.language) ? "arabic" : "indic",
     });
   } catch (error) {
     const modelError =
@@ -590,17 +632,31 @@ export const getSttHealth = async () => {
   }
 };
 
-export const getSttOptions = () =>
-  GenResObj(Code.OK, true, "STT options fetched successfully", {
-    languages: STT_LANGUAGES,
+export const getSttOptions = async () => {
+  const arabic = await checkArabicAvailability();
+
+  // Keep the normal Indic list; append Arabic only when health is up and it's missing.
+  const languages = [...INDIC_STT_LANGUAGES];
+  if (arabic.available && !languages.some((l) => l.code === ARABIC_STT_LANGUAGE.code)) {
+    languages.push(ARABIC_STT_LANGUAGE);
+  }
+
+  return GenResObj(Code.OK, true, "STT options fetched successfully", {
+    languages,
     modes: ["native", "mixed", "romanized"],
-    sampleRate: { min: 8000, max: 96000, default: 16000 },
+    sampleRate: { min: 8000, max: 192000, default: 16000 },
     endSilenceMs: { min: 250, max: 3000, default: 400 },
     partialsDefault: true,
     maxSessionMinutes: 20,
     maxPhraseSeconds: 25,
     modelConfigured: isSttModelConfigured(),
     transport: "websocket",
+    arabic: {
+      available: arabic.available,
+      reason: arabic.reason,
+      protocol: "delta_segment",
+      fileViaWebsocketOnly: true,
+    },
     audio: {
       encoding: "pcm_s16le",
       channels: 1,
@@ -627,6 +683,7 @@ export const getSttOptions = () =>
       pollIntervalMs: 1500,
     },
   });
+};
 
 const findOwnedTranscription = async (
   transcriptionUuid: string,
@@ -718,6 +775,85 @@ const applyProviderJobSnapshot = async (
   return updated ?? row;
 };
 
+const runArabicFileTranscriptionJob = async (
+  transcriptionUuid: string,
+  file: Buffer,
+) => {
+  try {
+    await db
+      .update(SttTranscriptions)
+      .set({
+        status: "processing",
+        stage: "decoding",
+        progress: 0.1,
+        updated_at: new Date(),
+      })
+      .where(eq(SttTranscriptions.transcription_uuid, transcriptionUuid));
+
+    const pcm = await decodeAudioToPcm16kMono(file);
+
+    await db
+      .update(SttTranscriptions)
+      .set({
+        stage: "transcribing",
+        progress: 0.35,
+        updated_at: new Date(),
+      })
+      .where(eq(SttTranscriptions.transcription_uuid, transcriptionUuid));
+
+    const result = await transcribeArabicFileOverWs(pcm);
+
+    const [completed] = await db
+      .update(SttTranscriptions)
+      .set({
+        status: "completed",
+        stage: "done",
+        progress: 1,
+        transcript: result.transcript,
+        audio_seconds: result.audioSeconds,
+        result_json: {
+          segments: result.segments,
+          protocol: "arabic_ws",
+        },
+        error_code: null,
+        error_message: null,
+        completed_at: new Date(),
+        updated_at: new Date(),
+      })
+      .where(eq(SttTranscriptions.transcription_uuid, transcriptionUuid))
+      .returning();
+
+    if (completed && result.audioSeconds > 0) {
+      await recordUsage({
+        userUuid: completed.user_uuid,
+        projectUuid: completed.project_uuid,
+        apiKeyUuid: completed.api_key_uuid,
+        type: "stt_seconds",
+        quantity: result.audioSeconds,
+        idempotencyKey: `stt-upload:${transcriptionUuid}`,
+        providerReference: completed.provider_job_id,
+        metadata: { transcriptionUuid, language: "ar" },
+      });
+    }
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : "Arabic file transcription failed";
+    console.error("Arabic file transcription failed:", error);
+    await db
+      .update(SttTranscriptions)
+      .set({
+        status: "failed",
+        stage: "failed",
+        progress: 1,
+        error_code: "arabic_ws_transcription_failed",
+        error_message: message,
+        completed_at: new Date(),
+        updated_at: new Date(),
+      })
+      .where(eq(SttTranscriptions.transcription_uuid, transcriptionUuid));
+  }
+};
+
 export const createSttTranscription = async (
   userUuid: string,
   payload: CreateSttTranscription,
@@ -731,6 +867,50 @@ export const createSttTranscription = async (
 
   if (file.size > maxUploadBytes()) {
     return GenResObj(Code.REQUEST_TOO_LONG, false, "Uploaded file exceeds the size limit");
+  }
+
+  // Arabic has no HTTP file API — stream the file over /ar/ws?key=… on the server.
+  if (isArabicSttLanguage(payload.language)) {
+    const arabic = await checkArabicAvailability();
+    if (!arabic.available) {
+      return GenResObj(
+        Code.SERVICE_UNAVAILABLE,
+        false,
+        arabic.reason || "Arabic transcription is currently unavailable",
+      );
+    }
+
+    const jobId = newArabicWsJobId();
+    const [row] = await db
+      .insert(SttTranscriptions)
+      .values({
+        user_uuid: userUuid,
+        project_uuid: projectUuid ?? null,
+        api_key_uuid: apiKeyUuid ?? null,
+        provider_job_id: jobId,
+        original_filename: file.originalname || "recording",
+        content_type: file.mimetype || null,
+        file_size_bytes: file.size,
+        language: "ar",
+        diarize: false,
+        speakers: null,
+        status: "processing",
+        stage: "queued",
+        progress: 0,
+      })
+      .returning();
+
+    if (!row) throw new Error("STT transcription creation failed");
+
+    const fileCopy = Buffer.from(file.buffer);
+    void runArabicFileTranscriptionJob(row.transcription_uuid, fileCopy);
+
+    return GenResObj(
+      Code.ACCEPTED,
+      true,
+      "Arabic transcription job started successfully",
+      serializeSttTranscription(row),
+    );
   }
 
   try {
@@ -838,6 +1018,16 @@ export const getSttTranscription = async (
   if (!row) return GenResObj(Code.NOT_FOUND, false, "STT transcription not found");
 
   if (row.status === "queued" || row.status === "processing") {
+    // Arabic WS jobs are updated in-process — just return the current row.
+    if (isArabicWsJobId(row.provider_job_id)) {
+      return GenResObj(
+        Code.OK,
+        true,
+        "STT transcription fetched successfully",
+        serializeSttTranscription(row),
+      );
+    }
+
     try {
       const job = await getTranscriptionJob(row.provider_job_id);
       const synced = await applyProviderJobSnapshot(row, job);
@@ -931,9 +1121,77 @@ export const downloadSttTranscription = async (
     }
   }
 
+  const safeName = (row.original_filename || "transcript").replace(/\.[^.]+$/, "");
+
+  // Arabic WS jobs store the transcript locally — no upstream download.
+  if (isArabicWsJobId(row.provider_job_id)) {
+    const text = (row.transcript || "").trim();
+    if (format === "txt") {
+      return {
+        file: {
+          content: Buffer.from(text || " ", "utf8"),
+          contentType: "text/plain; charset=utf-8",
+          format,
+          fileName: `${safeName}.txt`,
+        },
+      };
+    }
+    // Minimal SRT/VTT from stored segments when present.
+    const segments = Array.isArray((row.result_json as { segments?: unknown } | null)?.segments)
+      ? ((row.result_json as { segments: Array<{ start?: number; end?: number; text?: string }> })
+          .segments)
+      : [{ start: 0, end: Number(row.audio_seconds) || 1, text }];
+
+    const pad = (n: number, w: number) => String(Math.floor(n)).padStart(w, "0");
+    const ts = (seconds: number, vtt: boolean) => {
+      const s = Math.max(0, seconds);
+      const h = Math.floor(s / 3600);
+      const m = Math.floor((s % 3600) / 60);
+      const sec = Math.floor(s % 60);
+      const ms = Math.floor((s % 1) * 1000);
+      const sep = vtt ? "." : ",";
+      return `${pad(h, 2)}:${pad(m, 2)}:${pad(sec, 2)}${sep}${pad(ms, 3)}`;
+    };
+
+    if (format === "srt") {
+      const body = segments
+        .map((seg, i) => {
+          const start = Number(seg.start) || 0;
+          const end = Number(seg.end) || start + 1;
+          return `${i + 1}\n${ts(start, false)} --> ${ts(end, false)}\n${String(seg.text || "").trim()}\n`;
+        })
+        .join("\n");
+      return {
+        file: {
+          content: Buffer.from(body || " ", "utf8"),
+          contentType: "application/x-subrip",
+          format,
+          fileName: `${safeName}.srt`,
+        },
+      };
+    }
+
+    const vttBody =
+      "WEBVTT\n\n" +
+      segments
+        .map((seg) => {
+          const start = Number(seg.start) || 0;
+          const end = Number(seg.end) || start + 1;
+          return `${ts(start, true)} --> ${ts(end, true)}\n${String(seg.text || "").trim()}\n`;
+        })
+        .join("\n");
+    return {
+      file: {
+        content: Buffer.from(vttBody, "utf8"),
+        contentType: "text/vtt",
+        format,
+        fileName: `${safeName}.vtt`,
+      },
+    };
+  }
+
   try {
     const file = await downloadTranscriptionJob(row.provider_job_id, format);
-    const safeName = (row.original_filename || "transcript").replace(/\.[^.]+$/, "");
     return {
       file: {
         ...file,
@@ -965,20 +1223,22 @@ export const deleteSttTranscription = async (
   const row = await findOwnedTranscription(transcriptionUuid, userUuid);
   if (!row) return GenResObj(Code.NOT_FOUND, false, "STT transcription not found");
 
-  try {
-    await deleteTranscriptionJob(row.provider_job_id);
-  } catch (error) {
-    // Still delete locally if upstream is already gone.
-    if (!(error instanceof SttModelError && error.httpStatus === 404)) {
-      const modelError =
-        error instanceof SttModelError
-          ? error
-          : new SttModelError(
-              "Failed to cancel upstream transcription job",
-              "transcription_delete_failed",
-              500,
-            );
-      return GenResObj(modelError.httpStatus, false, modelError.message);
+  if (!isArabicWsJobId(row.provider_job_id)) {
+    try {
+      await deleteTranscriptionJob(row.provider_job_id);
+    } catch (error) {
+      // Still delete locally if upstream is already gone.
+      if (!(error instanceof SttModelError && error.httpStatus === 404)) {
+        const modelError =
+          error instanceof SttModelError
+            ? error
+            : new SttModelError(
+                "Failed to cancel upstream transcription job",
+                "transcription_delete_failed",
+                500,
+              );
+        return GenResObj(modelError.httpStatus, false, modelError.message);
+      }
     }
   }
 

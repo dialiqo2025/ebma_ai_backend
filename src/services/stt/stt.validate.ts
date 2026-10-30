@@ -29,6 +29,7 @@ export const STT_LANGUAGE_CODES = [
   "bgc",
   "bhb",
   "en",
+  "ar",
 ] as const;
 
 export const STT_OUTPUT_MODES = ["native", "mixed", "romanized"] as const;

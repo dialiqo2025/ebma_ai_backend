@@ -22,8 +22,12 @@ const sendProviderResponse = (response: Response, result: TResponse) => {
 };
 
 export const SttController = {
-  options: (_req: Request, res: Response) => {
-    sendProviderResponse(res, SttProvider.getSttOptions());
+  options: async (_req: Request, res: Response, next: NextFunction) => {
+    try {
+      sendProviderResponse(res, await SttProvider.getSttOptions());
+    } catch (error) {
+      next(error);
+    }
   },
 
   health: async (_req: Request, res: Response, next: NextFunction) => {

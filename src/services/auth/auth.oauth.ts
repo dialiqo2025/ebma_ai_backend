@@ -12,6 +12,7 @@ import {
   sanitizeUser,
 } from "./auth.helper";
 import { ensureDefaultPaygSubscription } from "../billing/billing.provider";
+import { assertWorkEmailForSignup } from "../../utils/work-email.util";
 
 type GoogleProfile = {
   sub: string;
@@ -98,6 +99,12 @@ const completeOAuthLogin = async (identity: OAuthIdentity) => {
         ok: false as const,
         message: `${identity.provider} did not return an email. Allow email access and try again.`,
       };
+    }
+
+    // New OAuth accounts must use a work email; existing users may keep personal domains.
+    const workEmail = assertWorkEmailForSignup(email);
+    if (!workEmail.ok) {
+      return { ok: false as const, message: workEmail.message };
     }
 
     const insertValues: typeof Users.$inferInsert = {

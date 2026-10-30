@@ -29,12 +29,14 @@ import {
   signUpType,
   updateProfileType,
 } from "./auth.validate";
+import { assertWorkEmailForSignup } from "../../utils/work-email.util";
 
 export const signUp = async (payload: signUpType) => {
   const email = normalizeEmail(payload.email);
   const existingUser = await getUserByEmail(email);
 
   if (existingUser) {
+    // Existing accounts (including personal emails) may finish verification / sign in.
     if (existingUser.email_verified) {
       return GenResObj(Code.CONFLICT, false, "An account with this email already exists", {
         verificationRequired: false,
@@ -56,6 +58,15 @@ export const signUp = async (payload: signUpType) => {
       email: existingUser.email,
       verificationRequired: true,
       expiresIn: otp.expiresIn,
+    });
+  }
+
+  const workEmail = assertWorkEmailForSignup(email);
+  if (!workEmail.ok) {
+    return GenResObj(Code.BAD_REQUEST, false, workEmail.message, {
+      code: workEmail.code,
+      verificationRequired: false,
+      email,
     });
   }
 

@@ -4,9 +4,11 @@ import * as SttProvider from "./stt.provider";
 import {
   createSttSessionValidator,
   createSttTranscriptionValidator,
+  finishArabicTranscriptionValidator,
   finishSttSessionValidator,
   listSttSessionsValidator,
   listSttTranscriptionsValidator,
+  startArabicTranscriptionValidator,
   sttFinalSegmentValidator,
   sttSessionUuidValidator,
   sttTokenRequestValidator,
@@ -172,6 +174,20 @@ export const SttController = {
 
   createTranscription: async (req: Request, res: Response, next: NextFunction) => {
     try {
+      // Arabic has no upload endpoint: a JSON request starts a browser stream instead.
+      if (!req.file && req.body?.language === "ar") {
+        sendProviderResponse(
+          res,
+          await SttProvider.startArabicTranscription(
+            userUuidFromRequest(req),
+            startArabicTranscriptionValidator.parse(req.body),
+            req.user?.projectId,
+            req.user?.apiKeyId,
+          ),
+        );
+        return;
+      }
+
       const payload = createSttTranscriptionValidator.parse({
         language: req.body?.language ?? req.query?.language,
         diarize: req.body?.diarize ?? req.query?.diarize,
@@ -185,6 +201,25 @@ export const SttController = {
           req.file as Express.Multer.File,
           req.user?.projectId,
           req.user?.apiKeyId,
+        ),
+      );
+    } catch (error) {
+      next(error);
+    }
+  },
+
+  finishArabicTranscription: async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const transcriptionUuid = sttTranscriptionUuidValidator.parse(
+        req.params.transcription_uuid,
+      );
+      const payload = finishArabicTranscriptionValidator.parse(req.body);
+      sendProviderResponse(
+        res,
+        await SttProvider.finishArabicTranscription(
+          transcriptionUuid,
+          userUuidFromRequest(req),
+          payload,
         ),
       );
     } catch (error) {

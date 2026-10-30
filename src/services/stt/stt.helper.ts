@@ -1,3 +1,5 @@
+import { randomUUID } from "crypto";
+
 export const STT_LANGUAGES = [
   { code: "auto", name: "Automatic detection" },
   { code: "ar", name: "Arabic (MSA + dialects)" },
@@ -36,6 +38,14 @@ export const ARABIC_STT_LANGUAGE = {
 } as const;
 
 export const INDIC_STT_LANGUAGES = STT_LANGUAGES;
+
+export const isArabicSttLanguage = (language: string) => language === "ar";
+
+// Arabic files have no upstream job: the browser streams them over /ar/ws and
+// reports the transcript back, so these rows carry a locally generated job ID.
+export const isArabicWsJobId = (jobId: string) => jobId.startsWith("arabic-ws:");
+
+export const newArabicWsJobId = () => `arabic-ws:${randomUUID()}`;
 
 export const isSttModelConfigured = () =>
   Boolean(

@@ -22,6 +22,8 @@ app.post("/api/v1/billing/webhook/razorpay", (req, res) =>
 // Needed so req.ip / X-Forwarded-For resolve correctly behind proxies.
 app.set("trust proxy", 1);
 
+// A long Arabic recording's transcript and segments can exceed the default limit.
+app.patch("/api/v1/stt/transcriptions/:transcription_uuid", express.json({ limit: "5mb" }));
 app.use(express.json({ limit: "256kb" }));
 app.use(express.urlencoded({ extended: true, limit: "256kb" }));
 

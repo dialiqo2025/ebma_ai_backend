@@ -6,28 +6,22 @@ import { GenResObj } from "../../utils/responseFormat.util";
 import { prepareTextForTts } from "../llm/llm.provider";
 import { recordUsage } from "../billing/billing.provider";
 import {
-  buildArabicWsUrlBase,
-  checkArabicAvailability,
-  isArabicSttLanguage,
-} from "./stt.arabic";
-import {
-  decodeAudioToPcm16kMono,
-  isArabicWsJobId,
-  newArabicWsJobId,
-  transcribeArabicFileOverWs,
-} from "./stt.arabic-file";
-import {
   ARABIC_STT_LANGUAGE,
   INDIC_STT_LANGUAGES,
+  isArabicSttLanguage,
+  isArabicWsJobId,
   isSttModelConfigured,
   mapProviderTranscriptionStatus,
   maxUploadBytes,
+  newArabicWsJobId,
   serializeSttSegment,
   serializeSttSession,
   serializeSttTranscription,
   toSttStartMessage,
 } from "./stt.helper";
 import {
+  buildArabicWsUrlBase,
+  checkArabicAvailability,
   createTranscriptionJob,
   deleteTranscriptionJob,
   downloadTranscriptionJob,
@@ -39,9 +33,11 @@ import {
 import type {
   CreateSttSession,
   CreateSttTranscription,
+  FinishArabicTranscription,
   FinishSttSession,
   ListSttSessions,
   ListSttTranscriptions,
+  StartArabicTranscription,
   SttFinalSegment,
   SttTokenRequest,
   UpdateSttSession,
@@ -635,11 +631,10 @@ export const getSttHealth = async () => {
 export const getSttOptions = async () => {
   const arabic = await checkArabicAvailability();
 
-  // Keep the normal Indic list; append Arabic only when health is up and it's missing.
-  const languages = [...INDIC_STT_LANGUAGES];
-  if (arabic.available && !languages.some((l) => l.code === ARABIC_STT_LANGUAGE.code)) {
-    languages.push(ARABIC_STT_LANGUAGE);
-  }
+  // Offer Arabic only while /ar/health reports the server is in Arabic mode.
+  const languages = INDIC_STT_LANGUAGES.filter(
+    (l) => l.code !== ARABIC_STT_LANGUAGE.code || arabic.available,
+  );
 
   return GenResObj(Code.OK, true, "STT options fetched successfully", {
     languages,
@@ -775,83 +770,181 @@ const applyProviderJobSnapshot = async (
   return updated ?? row;
 };
 
-const runArabicFileTranscriptionJob = async (
-  transcriptionUuid: string,
-  file: Buffer,
+// The ASR service ends Arabic sessions at 30 minutes. Close rows left behind by a
+// browser that disappeared before reporting a result.
+const expireStaleArabicTranscriptions = async (userUuid: string) => {
+  await db
+    .update(SttTranscriptions)
+    .set({
+      status: "failed",
+      stage: "failed",
+      progress: 1,
+      error_code: "arabic_stream_abandoned",
+      error_message: "The browser closed before the Arabic transcription finished.",
+      completed_at: new Date(),
+      updated_at: new Date(),
+    })
+    .where(
+      and(
+        eq(SttTranscriptions.user_uuid, userUuid),
+        eq(SttTranscriptions.status, "processing"),
+        lt(SttTranscriptions.updated_at, new Date(Date.now() - 35 * 60 * 1000)),
+        sql`${SttTranscriptions.provider_job_id} like 'arabic-ws:%'`,
+      ),
+    );
+};
+
+export const startArabicTranscription = async (
+  userUuid: string,
+  payload: StartArabicTranscription,
+  projectUuid?: string,
+  apiKeyUuid?: string,
 ) => {
+  if (payload.fileSizeBytes > maxUploadBytes()) {
+    return GenResObj(Code.REQUEST_TOO_LONG, false, "Uploaded file exceeds the size limit");
+  }
+
+  const arabic = await checkArabicAvailability();
+  if (!arabic.available) {
+    return GenResObj(
+      Code.SERVICE_UNAVAILABLE,
+      false,
+      arabic.reason || "Arabic transcription is currently unavailable",
+    );
+  }
+
   try {
-    await db
-      .update(SttTranscriptions)
-      .set({
+    const token = await requestSttBrowserToken({
+      subject: userUuid,
+      ttlSeconds: 300,
+      language: "auto",
+    });
+
+    const [row] = await db
+      .insert(SttTranscriptions)
+      .values({
+        user_uuid: userUuid,
+        project_uuid: projectUuid ?? null,
+        api_key_uuid: apiKeyUuid ?? null,
+        provider_job_id: newArabicWsJobId(),
+        original_filename: payload.filename,
+        content_type: payload.contentType || null,
+        file_size_bytes: payload.fileSizeBytes,
+        language: "ar",
+        diarize: false,
+        speakers: null,
         status: "processing",
-        stage: "decoding",
-        progress: 0.1,
-        updated_at: new Date(),
-      })
-      .where(eq(SttTranscriptions.transcription_uuid, transcriptionUuid));
-
-    const pcm = await decodeAudioToPcm16kMono(file);
-
-    await db
-      .update(SttTranscriptions)
-      .set({
         stage: "transcribing",
-        progress: 0.35,
-        updated_at: new Date(),
+        progress: 0,
       })
-      .where(eq(SttTranscriptions.transcription_uuid, transcriptionUuid));
-
-    const result = await transcribeArabicFileOverWs(pcm);
-
-    const [completed] = await db
-      .update(SttTranscriptions)
-      .set({
-        status: "completed",
-        stage: "done",
-        progress: 1,
-        transcript: result.transcript,
-        audio_seconds: result.audioSeconds,
-        result_json: {
-          segments: result.segments,
-          protocol: "arabic_ws",
-        },
-        error_code: null,
-        error_message: null,
-        completed_at: new Date(),
-        updated_at: new Date(),
-      })
-      .where(eq(SttTranscriptions.transcription_uuid, transcriptionUuid))
       .returning();
 
-    if (completed && result.audioSeconds > 0) {
-      await recordUsage({
-        userUuid: completed.user_uuid,
-        projectUuid: completed.project_uuid,
-        apiKeyUuid: completed.api_key_uuid,
-        type: "stt_seconds",
-        quantity: result.audioSeconds,
-        idempotencyKey: `stt-upload:${transcriptionUuid}`,
-        providerReference: completed.provider_job_id,
-        metadata: { transcriptionUuid, language: "ar" },
-      });
-    }
+    if (!row) throw new Error("STT transcription creation failed");
+
+    return GenResObj(Code.CREATED, true, "Arabic transcription started successfully", {
+      transcription: serializeSttTranscription(row),
+      connection: {
+        token: token.token,
+        wsUrl: buildArabicWsUrlBase(),
+        expiresIn: token.expires_in,
+        expiresAt: token.expires_at,
+      },
+    });
   } catch (error) {
-    const message =
-      error instanceof Error ? error.message : "Arabic file transcription failed";
-    console.error("Arabic file transcription failed:", error);
-    await db
-      .update(SttTranscriptions)
-      .set({
-        status: "failed",
-        stage: "failed",
-        progress: 1,
-        error_code: "arabic_ws_transcription_failed",
-        error_message: message,
-        completed_at: new Date(),
-        updated_at: new Date(),
-      })
-      .where(eq(SttTranscriptions.transcription_uuid, transcriptionUuid));
+    const modelError =
+      error instanceof SttModelError
+        ? error
+        : new SttModelError(
+            "Arabic transcription could not be started",
+            "arabic_transcription_start_failed",
+            500,
+          );
+
+    if (!(error instanceof SttModelError)) {
+      console.error("Unexpected Arabic transcription start error:", error);
+    }
+
+    return GenResObj(modelError.httpStatus, false, modelError.message, {
+      error: { code: modelError.code, message: modelError.message },
+    });
   }
+};
+
+export const finishArabicTranscription = async (
+  transcriptionUuid: string,
+  userUuid: string,
+  payload: FinishArabicTranscription,
+) => {
+  const row = await findOwnedTranscription(transcriptionUuid, userUuid);
+  if (!row) return GenResObj(Code.NOT_FOUND, false, "STT transcription not found");
+
+  if (!isArabicWsJobId(row.provider_job_id)) {
+    return GenResObj(Code.CONFLICT, false, "This is not an Arabic streaming transcription");
+  }
+
+  // A repeated report must not overwrite the result or bill the file twice.
+  if (row.status !== "processing") {
+    return GenResObj(
+      Code.OK,
+      true,
+      "STT transcription already finished",
+      serializeSttTranscription(row),
+    );
+  }
+
+  const [updated] = await db
+    .update(SttTranscriptions)
+    .set(
+      payload.status === "completed"
+        ? {
+            status: "completed",
+            stage: "done",
+            progress: 1,
+            transcript: payload.segments.map((segment) => segment.text).join(" "),
+            audio_seconds: payload.audioSeconds,
+            result_json: { segments: payload.segments, protocol: "arabic_ws" },
+            error_code: null,
+            error_message: null,
+            completed_at: new Date(),
+            updated_at: new Date(),
+          }
+        : {
+            status: "failed",
+            stage: "failed",
+            progress: 1,
+            error_code: payload.errorCode,
+            error_message: payload.errorMessage,
+            completed_at: new Date(),
+            updated_at: new Date(),
+          },
+    )
+    .where(
+      and(
+        eq(SttTranscriptions.transcription_uuid, transcriptionUuid),
+        eq(SttTranscriptions.status, "processing"),
+      ),
+    )
+    .returning();
+
+  if (updated && payload.status === "completed" && payload.audioSeconds > 0) {
+    await recordUsage({
+      userUuid: updated.user_uuid,
+      projectUuid: updated.project_uuid,
+      apiKeyUuid: updated.api_key_uuid,
+      type: "stt_seconds",
+      quantity: payload.audioSeconds,
+      idempotencyKey: `stt-upload:${transcriptionUuid}`,
+      providerReference: updated.provider_job_id,
+      metadata: { transcriptionUuid, language: "ar" },
+    });
+  }
+
+  return GenResObj(
+    Code.OK,
+    true,
+    "Arabic transcription saved successfully",
+    serializeSttTranscription(updated ?? row),
+  );
 };
 
 export const createSttTranscription = async (
@@ -869,47 +962,12 @@ export const createSttTranscription = async (
     return GenResObj(Code.REQUEST_TOO_LONG, false, "Uploaded file exceeds the size limit");
   }
 
-  // Arabic has no HTTP file API — stream the file over /ar/ws?key=… on the server.
+  // EBMA ASR has no Arabic upload endpoint — the browser streams the file itself.
   if (isArabicSttLanguage(payload.language)) {
-    const arabic = await checkArabicAvailability();
-    if (!arabic.available) {
-      return GenResObj(
-        Code.SERVICE_UNAVAILABLE,
-        false,
-        arabic.reason || "Arabic transcription is currently unavailable",
-      );
-    }
-
-    const jobId = newArabicWsJobId();
-    const [row] = await db
-      .insert(SttTranscriptions)
-      .values({
-        user_uuid: userUuid,
-        project_uuid: projectUuid ?? null,
-        api_key_uuid: apiKeyUuid ?? null,
-        provider_job_id: jobId,
-        original_filename: file.originalname || "recording",
-        content_type: file.mimetype || null,
-        file_size_bytes: file.size,
-        language: "ar",
-        diarize: false,
-        speakers: null,
-        status: "processing",
-        stage: "queued",
-        progress: 0,
-      })
-      .returning();
-
-    if (!row) throw new Error("STT transcription creation failed");
-
-    const fileCopy = Buffer.from(file.buffer);
-    void runArabicFileTranscriptionJob(row.transcription_uuid, fileCopy);
-
     return GenResObj(
-      Code.ACCEPTED,
-      true,
-      "Arabic transcription job started successfully",
-      serializeSttTranscription(row),
+      Code.BAD_REQUEST,
+      false,
+      "Arabic files cannot be uploaded: send a JSON request without a file and stream the audio over the returned connection",
     );
   }
 
@@ -972,6 +1030,8 @@ export const listSttTranscriptions = async (
   userUuid: string,
   query: ListSttTranscriptions,
 ) => {
+  await expireStaleArabicTranscriptions(userUuid);
+
   const offset = (query.page - 1) * query.page_size;
   const filters = and(
     eq(SttTranscriptions.user_uuid, userUuid),
@@ -1018,13 +1078,15 @@ export const getSttTranscription = async (
   if (!row) return GenResObj(Code.NOT_FOUND, false, "STT transcription not found");
 
   if (row.status === "queued" || row.status === "processing") {
-    // Arabic WS jobs are updated in-process — just return the current row.
+    // Arabic streams are reported by the browser — there is no upstream job to poll.
     if (isArabicWsJobId(row.provider_job_id)) {
+      await expireStaleArabicTranscriptions(userUuid);
+      const latest = await findOwnedTranscription(transcriptionUuid, userUuid);
       return GenResObj(
         Code.OK,
         true,
         "STT transcription fetched successfully",
-        serializeSttTranscription(row),
+        serializeSttTranscription(latest ?? row),
       );
     }
 

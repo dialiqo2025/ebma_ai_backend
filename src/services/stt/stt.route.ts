@@ -1,4 +1,5 @@
 import { Router } from "express";
+import type { NextFunction, Request, Response } from "express";
 import { authCheck } from "../../middleware/jwt.middleware";
 import { SttController } from "./stt.controller";
 import { sttTokenRateLimit } from "./stt.rate-limit";
@@ -7,12 +8,22 @@ import { sttTranscriptionUpload } from "./stt.upload";
 const router = Router();
 const authenticated = authCheck(["user", "admin", "superAdmin", "tenant"]);
 
+// Starting an Arabic stream (JSON body, no file) mints a browser token.
+const arabicStreamTokenRateLimit = (req: Request, res: Response, next: NextFunction) => {
+  if (req.body?.language === "ar") {
+    sttTokenRateLimit(req, res, next);
+    return;
+  }
+  next();
+};
+
 router.get("/options", authenticated, SttController.options);
 router.get("/health", authenticated, SttController.health);
 
 router.post(
   "/transcriptions",
   authenticated,
+  arabicStreamTokenRateLimit,
   sttTranscriptionUpload,
   SttController.createTranscription,
 );
@@ -21,6 +32,11 @@ router.get(
   "/transcriptions/:transcription_uuid",
   authenticated,
   SttController.getTranscription,
+);
+router.patch(
+  "/transcriptions/:transcription_uuid",
+  authenticated,
+  SttController.finishArabicTranscription,
 );
 router.get(
   "/transcriptions/:transcription_uuid/download",

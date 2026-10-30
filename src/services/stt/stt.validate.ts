@@ -133,6 +133,40 @@ export const createSttTranscriptionValidator = z
   })
   .strict();
 
+export const startArabicTranscriptionValidator = z
+  .object({
+    language: z.literal("ar"),
+    filename: z.string().trim().min(1).max(255),
+    contentType: z.string().trim().max(255).optional(),
+    fileSizeBytes: z.number().int().positive(),
+  })
+  .strict();
+
+export const finishArabicTranscriptionValidator = z.discriminatedUnion("status", [
+  z
+    .object({
+      status: z.literal("completed"),
+      audioSeconds: z.number().min(0),
+      segments: z.array(
+        z
+          .object({
+            start: z.number().min(0),
+            end: z.number().min(0),
+            text: z.string().trim().min(1).max(20_000),
+          })
+          .strict(),
+      ),
+    })
+    .strict(),
+  z
+    .object({
+      status: z.literal("failed"),
+      errorCode: z.string().trim().min(1).max(100),
+      errorMessage: z.string().trim().min(1).max(1000),
+    })
+    .strict(),
+]);
+
 export const listSttTranscriptionsValidator = z.object({
   page: z.coerce.number().int().min(1).default(1),
   page_size: z.coerce.number().int().min(1).max(100).default(10),
@@ -150,5 +184,7 @@ export const sttTranscriptionDownloadValidator = z.object({
 });
 
 export type CreateSttTranscription = z.infer<typeof createSttTranscriptionValidator>;
+export type StartArabicTranscription = z.infer<typeof startArabicTranscriptionValidator>;
+export type FinishArabicTranscription = z.infer<typeof finishArabicTranscriptionValidator>;
 export type ListSttTranscriptions = z.infer<typeof listSttTranscriptionsValidator>;
 export type SttTranscriptionDownload = z.infer<typeof sttTranscriptionDownloadValidator>;

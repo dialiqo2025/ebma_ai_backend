@@ -54,6 +54,85 @@ const modelConfiguration = () => {
   return { baseUrl, apiKey };
 };
 
+/** Strip query/hash and trailing slash from a WS or HTTP URL. */
+const stripUrl = (value: string) =>
+  value.trim().replace(/[#?].*$/, "").replace(/\/+$/, "");
+
+/**
+ * Dedicated Arabic WebSocket base, e.g. wss://gpu…/ar/ws
+ * Falls back to deriving from EBMA_ASR_BACKEND_URL only if the dedicated var is empty.
+ */
+const arabicWsUrlFromEnv = () => {
+  const dedicated = stripUrl(process.env.EBMA_ASR_ARABIC_WS_URL || "");
+  if (dedicated) return dedicated;
+
+  const httpBase = stripUrl(process.env.EBMA_ASR_BACKEND_URL || "");
+  if (!httpBase) return "";
+  return `${httpBase.replace(/^http/, "ws")}/ar/ws`;
+};
+
+/** HTTP health URL for Arabic — optional override, else derived from WS URL. */
+const arabicHealthUrlFromEnv = () => {
+  const dedicated = stripUrl(process.env.EBMA_ASR_ARABIC_HEALTH_URL || "");
+  if (dedicated) return dedicated;
+
+  const ws = arabicWsUrlFromEnv();
+  if (!ws) return "";
+  return ws.replace(/^ws/, "http").replace(/\/ar\/ws$/i, "/ar/health");
+};
+
+/** Arabic WebSocket base without query (the browser appends ?token=). */
+export const buildArabicWsUrlBase = () => {
+  const base = arabicWsUrlFromEnv();
+  if (!base) {
+    throw new Error("EBMA_ASR_ARABIC_WS_URL (or EBMA_ASR_BACKEND_URL) is not configured");
+  }
+  return base;
+};
+
+export type ArabicAvailability = {
+  available: boolean;
+  statusCode: number;
+  reason: string | null;
+};
+
+/** Server-side only — /ar/health is not CORS-friendly for browsers. */
+export const checkArabicAvailability = async (): Promise<ArabicAvailability> => {
+  const healthUrl = arabicHealthUrlFromEnv();
+  const apiKey = process.env.EBMA_ASR_API_KEY?.trim();
+  if (!healthUrl || !apiKey) {
+    return {
+      available: false,
+      statusCode: 503,
+      reason: "Arabic transcription is currently unavailable.",
+    };
+  }
+
+  try {
+    const response = await fetch(healthUrl, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${apiKey}` },
+      signal: AbortSignal.timeout(10_000),
+    });
+
+    if (response.status === 200) {
+      return { available: true, statusCode: 200, reason: null };
+    }
+
+    return {
+      available: false,
+      statusCode: response.status,
+      reason: "Arabic transcription is currently unavailable.",
+    };
+  } catch {
+    return {
+      available: false,
+      statusCode: 503,
+      reason: "Arabic transcription is currently unavailable.",
+    };
+  }
+};
+
 const modelFetch = async (
   path: string,
   init: RequestInit,

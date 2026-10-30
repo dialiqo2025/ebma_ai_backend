@@ -2,7 +2,7 @@ import { randomUUID } from "crypto";
 
 export const STT_LANGUAGES = [
   { code: "auto", name: "Automatic detection" },
-  { code: "ar", name: "Arabic (MSA + dialects)" },
+  { code: "ar", name: "Arabic" },
   { code: "hi", name: "Hindi" },
   { code: "bn", name: "Bengali" },
   { code: "ta", name: "Tamil" },
@@ -34,7 +34,7 @@ export const STT_LANGUAGES = [
 
 export const ARABIC_STT_LANGUAGE = {
   code: "ar",
-  name: "Arabic (MSA + dialects)",
+  name: "Arabic",
 } as const;
 
 export const INDIC_STT_LANGUAGES = STT_LANGUAGES;

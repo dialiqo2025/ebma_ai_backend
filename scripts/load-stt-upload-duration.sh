@@ -148,7 +148,8 @@ PY
 # cols: end_epoch worker seq http_code upload_sec poll_sec e2e_sec uuid status ok err_code
 write_row() {
   local end_epoch="$1" worker="$2" seq="$3" code="$4" upload_sec="$5"
-  local poll_sec="$6" e2e_sec="$7" uuid="$8" status="$9" ok="$10" err_code="${11:-}"
+  # Bash: $10 is ${1}0 — must use ${10} / ${11} for args 10+.
+  local poll_sec="$6" e2e_sec="$7" uuid="$8" status="$9" ok="${10}" err_code="${11:-}"
   local row_file="$OUT_DIR/rows/w${worker}-$(printf '%06d' "$seq").tsv"
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$end_epoch" "$worker" "$seq" "$code" "$upload_sec" "$poll_sec" \

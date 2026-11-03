@@ -276,7 +276,10 @@ export const listApiTransactions = async (query: Record<string, unknown>) => {
     .leftJoin(Users, eq(ApiTransactionLogs.user_uuid, Users.user_uuid)).where(filters);
   const items = await db.select({ log: ApiTransactionLogs, userEmail: Users.email, userName: Users.fullName })
     .from(ApiTransactionLogs).leftJoin(Users, eq(ApiTransactionLogs.user_uuid, Users.user_uuid))
-    .where(filters).orderBy(desc(ApiTransactionLogs.created_at)).limit(pageSize).offset((page - 1) * pageSize);
+    .where(filters)
+    .orderBy(desc(ApiTransactionLogs.created_at), desc(ApiTransactionLogs.log_uuid))
+    .limit(pageSize)
+    .offset((page - 1) * pageSize);
   const total = Number(countRow?.count ?? 0);
   return { items: items.map(({ log, ...user }) => ({ ...log, ...user })), pagination: { page, pageSize, total, totalPages: Math.ceil(total / pageSize), hasNextPage: page * pageSize < total } };
 };
@@ -297,7 +300,10 @@ export const listGpuTransactions = async (query: Record<string, unknown>) => {
     .leftJoin(Users, eq(GpuServiceLogs.user_uuid, Users.user_uuid)).where(filters);
   const items = await db.select({ log: GpuServiceLogs, userEmail: Users.email, userName: Users.fullName })
     .from(GpuServiceLogs).leftJoin(Users, eq(GpuServiceLogs.user_uuid, Users.user_uuid))
-    .where(filters).orderBy(desc(GpuServiceLogs.created_at)).limit(pageSize).offset((page - 1) * pageSize);
+    .where(filters)
+    .orderBy(desc(GpuServiceLogs.created_at), desc(GpuServiceLogs.log_uuid))
+    .limit(pageSize)
+    .offset((page - 1) * pageSize);
   const total = Number(countRow?.count ?? 0);
   return { items: items.map(({ log, ...user }) => ({ ...log, ...user })), pagination: { page, pageSize, total, totalPages: Math.ceil(total / pageSize), hasNextPage: page * pageSize < total } };
 };

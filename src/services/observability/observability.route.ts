@@ -51,7 +51,7 @@ router.get("/gpu-operations/:service/:operation_uuid", superAdmin, async (req, r
 router.get("/gpu-operations/:service/:operation_uuid/result", superAdmin, async (req, res, next) => {
   try {
     const operationUuid = String(req.params.operation_uuid || "");
-    const result = await monitoredOperationResult(req.params.service, operationUuid);
+    const result = await monitoredOperationResult(req.params.service, operationUuid, req.query.format);
     if (!result) {
       res.status(404).json(GenResObj(Code.NOT_FOUND, false, "Result file is not available for this operation").data);
       return;

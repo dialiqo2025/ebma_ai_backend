@@ -33,7 +33,7 @@ set -euo pipefail
 # POLL_MAX="${POLL_MAX:-60}"
 # TIMEOUT="${TIMEOUT:-120}"
 export BASE_URL="https://api.ebma.ai"
-export TOKEN="Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...."   # paste your real token
+export TOKEN="Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6ImEwMmE5NDYwLWQyMDgtNDAxYi04ZTRhLTM1ZmM3MTc5M2Q0YiIsInJvbGUiOiJ1c2VyIiwiaWF0IjoxNzkzMjY5Njg3LCJleHAiOjE3OTU4NjE2ODd9.E3obLAJhY35BfPRtOkjO0BdxUNWlAFuMtvAGYzEfxFQ"   # paste your real token
 export FILE="docs/ebma-asr/docs/sample_hi.wav"
 export LANGUAGE="hi"
 export DIARIZE="false"

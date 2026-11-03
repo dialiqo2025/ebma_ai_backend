@@ -80,6 +80,7 @@ export const createSttSession = async (userUuid: string, payload: CreateSttSessi
       user_uuid: userUuid,
       project_uuid: projectUuid ?? null,
       api_key_uuid: apiKeyUuid ?? null,
+      request_id: currentRequestContext()?.requestId ?? null,
       language: payload.language,
       output_mode: payload.mode,
       sample_rate: isArabicSttLanguage(payload.language) ? 16000 : payload.sampleRate,
@@ -329,6 +330,7 @@ export const createSttBrowserToken = async (
       .update(SttSessions)
       .set({
         status: "connecting",
+        request_id: currentRequestContext()?.requestId ?? session.request_id,
         error_code: null,
         error_message: null,
         completed_at: null,

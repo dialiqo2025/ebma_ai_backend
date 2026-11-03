@@ -21,6 +21,16 @@ const MAX_SERIALIZED = 16_000;
 const SENSITIVE_KEY = /authorization|cookie|password|token|secret|api[_-]?key|audio_base64|file|buffer/i;
 const artifactDirectory = path.resolve(process.cwd(), "storage", "monitoring", "stt");
 
+const gpuOperationStalledAfterMinutes = () => {
+  const configured = Number(process.env.GPU_OPERATION_STALLED_AFTER_MINUTES ?? 30);
+  return Number.isFinite(configured) && configured >= 1
+    ? Math.min(Math.floor(configured), 10_080)
+    : 30;
+};
+
+const gpuOperationStalledCutoff = () =>
+  new Date(Date.now() - gpuOperationStalledAfterMinutes() * 60_000);
+
 const truncate = (value: string, max = MAX_TEXT) =>
   value.length > max ? `${value.slice(0, max)}…[truncated]` : value;
 
@@ -312,8 +322,12 @@ export const listGpuTransactions = async (query: Record<string, unknown>) => {
   return { items: items.map(({ log, ...user }) => ({ ...log, ...user })), pagination: { page, pageSize, total, totalPages: Math.ceil(total / pageSize), hasNextPage: page * pageSize < total } };
 };
 
-const operationStatus = (status: string) =>
-  status === "completed" ? "success" : ["failed", "cancelled"].includes(status) ? "failed" : "processing";
+const operationStatus = (status: string, updatedAt: Date, stalledCutoff = gpuOperationStalledCutoff()) => {
+  if (status === "completed") return "success" as const;
+  if (["failed", "cancelled"].includes(status)) return "failed" as const;
+  if (updatedAt < stalledCutoff) return "stalled" as const;
+  return ["queued", "created", "connecting"].includes(status) ? "queued" as const : "processing" as const;
+};
 
 /** One row per user-visible STT transcription or TTS generation. */
 export const listGpuOperations = async (query: Record<string, unknown>) => {
@@ -327,22 +341,31 @@ export const listGpuOperations = async (query: Record<string, unknown>) => {
   const from = requestedFrom ?? new Date(Date.now() - (retention?.retention_days ?? 7) * 86_400_000);
   const to = dateInput(query.to);
   const userUuid = userUuidInput(query.userUuid);
-  const requestedStatus = ["success", "failed", "processing"].includes(String(query.status)) ? String(query.status) : undefined;
+  const stalledCutoff = gpuOperationStalledCutoff();
+  const requestedStatus = ["success", "failed", "queued", "processing", "stalled"].includes(String(query.status)) ? String(query.status) : undefined;
   const includeStt = query.service !== "tts";
   const includeTts = query.service !== "stt";
   const sttStatus = requestedStatus === "success"
     ? eq(SttTranscriptions.status, "completed")
     : requestedStatus === "failed"
       ? sql`${SttTranscriptions.status} in ('failed', 'cancelled')`
+      : requestedStatus === "queued"
+        ? and(eq(SttTranscriptions.status, "queued"), gte(SttTranscriptions.updated_at, stalledCutoff))
       : requestedStatus === "processing"
-        ? sql`${SttTranscriptions.status} not in ('completed', 'failed', 'cancelled')`
+        ? and(eq(SttTranscriptions.status, "processing"), gte(SttTranscriptions.updated_at, stalledCutoff))
+      : requestedStatus === "stalled"
+        ? and(sql`${SttTranscriptions.status} not in ('completed', 'failed', 'cancelled')`, lt(SttTranscriptions.updated_at, stalledCutoff))
         : undefined;
   const ttsStatus = requestedStatus === "success"
     ? eq(TtsGenerations.status, "completed")
     : requestedStatus === "failed"
       ? eq(TtsGenerations.status, "failed")
+      : requestedStatus === "queued"
+        ? and(eq(TtsGenerations.status, "queued"), gte(TtsGenerations.updated_at, stalledCutoff))
       : requestedStatus === "processing"
-        ? sql`${TtsGenerations.status} not in ('completed', 'failed')`
+        ? and(eq(TtsGenerations.status, "processing"), gte(TtsGenerations.updated_at, stalledCutoff))
+      : requestedStatus === "stalled"
+        ? and(sql`${TtsGenerations.status} not in ('completed', 'failed')`, lt(TtsGenerations.updated_at, stalledCutoff))
         : undefined;
   const sttFilters = and(
     sttStatus,
@@ -355,8 +378,12 @@ export const listGpuOperations = async (query: Record<string, unknown>) => {
     ? eq(SttSessions.status, "completed")
     : requestedStatus === "failed"
       ? eq(SttSessions.status, "failed")
+      : requestedStatus === "queued"
+        ? and(sql`${SttSessions.status} in ('created', 'connecting')`, gte(SttSessions.updated_at, stalledCutoff))
       : requestedStatus === "processing"
-        ? sql`${SttSessions.status} not in ('completed', 'failed')`
+        ? and(eq(SttSessions.status, "streaming"), gte(SttSessions.updated_at, stalledCutoff))
+      : requestedStatus === "stalled"
+        ? and(sql`${SttSessions.status} not in ('completed', 'failed')`, lt(SttSessions.updated_at, stalledCutoff))
         : undefined;
   const sessionFilters = and(
     sessionStatus,
@@ -399,7 +426,7 @@ export const listGpuOperations = async (query: Record<string, unknown>) => {
       operationUuid: operation.transcription_uuid,
       service: "stt" as const,
       operationType: "transcription",
-      status: operationStatus(operation.status),
+      status: operationStatus(operation.status, operation.updated_at, stalledCutoff),
       rawStatus: operation.status,
       title: operation.original_filename,
       userUuid: operation.user_uuid,
@@ -420,7 +447,7 @@ export const listGpuOperations = async (query: Record<string, unknown>) => {
       operationUuid: operation.session_uuid,
       service: "stt" as const,
       operationType: "live session",
-      status: operationStatus(operation.status),
+      status: operationStatus(operation.status, operation.updated_at, stalledCutoff),
       rawStatus: operation.status,
       title: `Live ${operation.language.toUpperCase()} · ${operation.output_mode}`,
       userUuid: operation.user_uuid,
@@ -441,7 +468,7 @@ export const listGpuOperations = async (query: Record<string, unknown>) => {
       operationUuid: operation.generation_uuid,
       service: "tts" as const,
       operationType: "generation",
-      status: operationStatus(operation.status),
+      status: operationStatus(operation.status, operation.updated_at, stalledCutoff),
       rawStatus: operation.status,
       title: truncate(operation.input_text, 120),
       userUuid: operation.user_uuid,
@@ -489,6 +516,7 @@ export const getGpuOperationStatistics = async (query: Record<string, unknown>) 
   const from = requestedFrom ?? new Date(Date.now() - (retention?.retention_days ?? 7) * 86_400_000);
   const to = dateInput(query.to);
   const userUuid = userUuidInput(query.userUuid);
+  const stalledCutoff = gpuOperationStalledCutoff();
   const sttFilter = and(
     userUuid ? eq(SttTranscriptions.user_uuid, userUuid) : undefined,
     gte(SttTranscriptions.created_at, from),
@@ -515,21 +543,27 @@ export const getGpuOperationStatistics = async (query: Record<string, unknown>) 
       total: sql<number>`count(*)::int`,
       success: sql<number>`count(*) filter (where ${SttTranscriptions.status} = 'completed')::int`,
       failed: sql<number>`count(*) filter (where ${SttTranscriptions.status} in ('failed', 'cancelled'))::int`,
-      processing: sql<number>`count(*) filter (where ${SttTranscriptions.status} not in ('completed', 'failed', 'cancelled'))::int`,
+      queued: sql<number>`count(*) filter (where ${SttTranscriptions.status} = 'queued' and ${SttTranscriptions.updated_at} >= ${stalledCutoff})::int`,
+      processing: sql<number>`count(*) filter (where ${SttTranscriptions.status} = 'processing' and ${SttTranscriptions.updated_at} >= ${stalledCutoff})::int`,
+      stalled: sql<number>`count(*) filter (where ${SttTranscriptions.status} not in ('completed', 'failed', 'cancelled') and ${SttTranscriptions.updated_at} < ${stalledCutoff})::int`,
       audioSeconds: sql<number>`coalesce(sum(${SttTranscriptions.audio_seconds}), 0)`,
     }).from(SttTranscriptions).where(sttFilter),
     db.select({
       total: sql<number>`count(*)::int`,
       success: sql<number>`count(*) filter (where ${SttSessions.status} = 'completed')::int`,
       failed: sql<number>`count(*) filter (where ${SttSessions.status} = 'failed')::int`,
-      processing: sql<number>`count(*) filter (where ${SttSessions.status} not in ('completed', 'failed'))::int`,
+      queued: sql<number>`count(*) filter (where ${SttSessions.status} in ('created', 'connecting') and ${SttSessions.updated_at} >= ${stalledCutoff})::int`,
+      processing: sql<number>`count(*) filter (where ${SttSessions.status} = 'streaming' and ${SttSessions.updated_at} >= ${stalledCutoff})::int`,
+      stalled: sql<number>`count(*) filter (where ${SttSessions.status} not in ('completed', 'failed') and ${SttSessions.updated_at} < ${stalledCutoff})::int`,
       audioSeconds: sql<number>`coalesce(sum(${SttSessions.audio_duration_seconds}), 0)`,
     }).from(SttSessions).where(sessionFilter),
     db.select({
       total: sql<number>`count(*)::int`,
       success: sql<number>`count(*) filter (where ${TtsGenerations.status} = 'completed')::int`,
       failed: sql<number>`count(*) filter (where ${TtsGenerations.status} = 'failed')::int`,
-      processing: sql<number>`count(*) filter (where ${TtsGenerations.status} not in ('completed', 'failed'))::int`,
+      queued: sql<number>`count(*) filter (where ${TtsGenerations.status} = 'queued' and ${TtsGenerations.updated_at} >= ${stalledCutoff})::int`,
+      processing: sql<number>`count(*) filter (where ${TtsGenerations.status} = 'processing' and ${TtsGenerations.updated_at} >= ${stalledCutoff})::int`,
+      stalled: sql<number>`count(*) filter (where ${TtsGenerations.status} not in ('completed', 'failed') and ${TtsGenerations.updated_at} < ${stalledCutoff})::int`,
       defaultVoice: sql<number>`count(*) filter (where ${TtsGenerations.voice_mode} = 'default')::int`,
       clonedVoice: sql<number>`count(*) filter (where ${TtsGenerations.voice_mode} = 'clone')::int`,
       inputCharacters: sql<number>`coalesce(sum(length(${TtsGenerations.input_text})), 0)::int`,
@@ -543,7 +577,9 @@ export const getGpuOperationStatistics = async (query: Record<string, unknown>) 
   const ttsTotal = Number(tts?.total ?? 0);
   const success = Number(files?.success ?? 0) + Number(sessions?.success ?? 0) + Number(tts?.success ?? 0);
   const failed = Number(files?.failed ?? 0) + Number(sessions?.failed ?? 0) + Number(tts?.failed ?? 0);
+  const queued = Number(files?.queued ?? 0) + Number(sessions?.queued ?? 0) + Number(tts?.queued ?? 0);
   const processing = Number(files?.processing ?? 0) + Number(sessions?.processing ?? 0) + Number(tts?.processing ?? 0);
+  const stalled = Number(files?.stalled ?? 0) + Number(sessions?.stalled ?? 0) + Number(tts?.stalled ?? 0);
   const total = fileTotal + liveTotal + ttsTotal;
   return {
     from,
@@ -551,7 +587,10 @@ export const getGpuOperationStatistics = async (query: Record<string, unknown>) 
     totalRequests: total,
     successRequests: success,
     failedRequests: failed,
+    queuedRequests: queued,
     processingRequests: processing,
+    stalledRequests: stalled,
+    stalledAfterMinutes: gpuOperationStalledAfterMinutes(),
     successRate: total ? (success / total) * 100 : 0,
     sttRequests: fileTotal + liveTotal,
     sttLiveSessions: liveTotal,
@@ -729,7 +768,7 @@ export const getGpuOperationDetails = async (service: unknown, operationUuid: st
       operationUuid,
       service,
       operationType: service === "tts" ? "generation" : isLiveSession ? "live session" : "transcription",
-      status: operationStatus(operation.status),
+      status: operationStatus(operation.status, operation.updated_at),
       rawStatus: operation.status,
       userUuid: operation.user_uuid,
       userEmail: domainRow.userEmail,
@@ -749,7 +788,9 @@ export const getGpuOperationDetails = async (service: unknown, operationUuid: st
         : { inputCharacters: operation.input_text.length, outputAudioBytes: operation.audio_size_bytes, outputFormat: operation.audio_format, language: operation.language, voiceMode: operation.voice_mode },
       input: service === "tts" ? { text: operation.input_text } : isLiveSession ? { mode: operation.output_mode, language: operation.language } : { filename: operation.original_filename },
       output: service === "tts" ? { audioFileName: operation.audio_file_name, mimeType: operation.audio_mime_type } : { transcript: operation.transcript, ...(!isLiveSession ? { result: operation.result_json } : {}) },
-      resultAvailable: service === "stt" ? Boolean(operation.transcript) : Boolean(operation.audio_file_name && operation.status === "completed"),
+      resultAvailable: service === "stt" ? Boolean(operation.transcript || (!isLiveSession && operation.result_json)) : Boolean(operation.audio_file_name && operation.status === "completed"),
+      transcriptAvailable: service === "stt" && Boolean(operation.transcript),
+      apiResultAvailable: service === "stt" && !isLiveSession && Boolean(operation.result_json),
     },
     billing: {
       items: billing,
@@ -760,18 +801,24 @@ export const getGpuOperationDetails = async (service: unknown, operationUuid: st
   };
 };
 
-export const monitoredOperationResult = async (service: unknown, operationUuid: string) => {
+export const monitoredOperationResult = async (service: unknown, operationUuid: string, requestedFormat?: unknown) => {
   if (service === "stt") {
-    const [transcription] = await db.select({ transcript: SttTranscriptions.transcript, originalName: SttTranscriptions.original_filename })
+    const [transcription] = await db.select({ transcript: SttTranscriptions.transcript, originalName: SttTranscriptions.original_filename, result: SttTranscriptions.result_json })
       .from(SttTranscriptions).where(eq(SttTranscriptions.transcription_uuid, operationUuid)).limit(1);
-    let row: { transcript: string; originalName: string } | undefined = transcription;
+    let row: { transcript: string; originalName: string; result: unknown } | undefined = transcription;
     if (!row) {
       const [session] = await db.select({ transcript: SttSessions.transcript })
         .from(SttSessions).where(eq(SttSessions.session_uuid, operationUuid)).limit(1);
-      if (session) row = { transcript: session.transcript, originalName: `live-session-${operationUuid}` };
+      if (session) row = { transcript: session.transcript, originalName: `live-session-${operationUuid}`, result: null };
     }
-    if (!row?.transcript) return null;
+    if (!row) return null;
     const baseName = path.basename(row.originalName, path.extname(row.originalName)).replace(/[^a-zA-Z0-9._-]/g, "_") || "transcription";
+    if (requestedFormat === "json") {
+      const result = row.result ?? (row.transcript ? { text: row.transcript } : null);
+      if (!result) return null;
+      return { kind: "text" as const, content: JSON.stringify(result, null, 2), fileName: `${baseName}-result.json`, contentType: "application/json; charset=utf-8" };
+    }
+    if (!row.transcript) return null;
     return { kind: "text" as const, content: row.transcript, fileName: `${baseName}-transcript.txt`, contentType: "text/plain; charset=utf-8" };
   }
   if (service === "tts") {

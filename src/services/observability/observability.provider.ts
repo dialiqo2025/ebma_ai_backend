@@ -547,6 +547,8 @@ export const getGpuOperationStatistics = async (query: Record<string, unknown>) 
       processing: sql<number>`count(*) filter (where ${SttTranscriptions.status} = 'processing' and ${SttTranscriptions.updated_at} >= ${stalledCutoff})::int`,
       stalled: sql<number>`count(*) filter (where ${SttTranscriptions.status} not in ('completed', 'failed', 'cancelled') and ${SttTranscriptions.updated_at} < ${stalledCutoff})::int`,
       audioSeconds: sql<number>`coalesce(sum(${SttTranscriptions.audio_seconds}), 0)`,
+      uploadedBytes: sql<number>`coalesce(sum(${SttTranscriptions.file_size_bytes}), 0)`,
+      transcriptCharacters: sql<number>`coalesce(sum(length(${SttTranscriptions.transcript})), 0)::int`,
     }).from(SttTranscriptions).where(sttFilter),
     db.select({
       total: sql<number>`count(*)::int`,
@@ -556,6 +558,7 @@ export const getGpuOperationStatistics = async (query: Record<string, unknown>) 
       processing: sql<number>`count(*) filter (where ${SttSessions.status} = 'streaming' and ${SttSessions.updated_at} >= ${stalledCutoff})::int`,
       stalled: sql<number>`count(*) filter (where ${SttSessions.status} not in ('completed', 'failed') and ${SttSessions.updated_at} < ${stalledCutoff})::int`,
       audioSeconds: sql<number>`coalesce(sum(${SttSessions.audio_duration_seconds}), 0)`,
+      transcriptCharacters: sql<number>`coalesce(sum(length(${SttSessions.transcript})), 0)::int`,
     }).from(SttSessions).where(sessionFilter),
     db.select({
       total: sql<number>`count(*)::int`,
@@ -576,10 +579,20 @@ export const getGpuOperationStatistics = async (query: Record<string, unknown>) 
       clonedQueued: sql<number>`count(*) filter (where ${TtsGenerations.voice_mode} = 'clone' and ${TtsGenerations.status} = 'queued' and ${TtsGenerations.updated_at} >= ${stalledCutoff})::int`,
       clonedProcessing: sql<number>`count(*) filter (where ${TtsGenerations.voice_mode} = 'clone' and ${TtsGenerations.status} = 'processing' and ${TtsGenerations.updated_at} >= ${stalledCutoff})::int`,
       clonedStalled: sql<number>`count(*) filter (where ${TtsGenerations.voice_mode} = 'clone' and ${TtsGenerations.status} not in ('completed', 'failed') and ${TtsGenerations.updated_at} < ${stalledCutoff})::int`,
+      defaultInputCharacters: sql<number>`coalesce(sum(length(${TtsGenerations.input_text})) filter (where ${TtsGenerations.voice_mode} = 'default'), 0)::int`,
+      defaultOutputBytes: sql<number>`coalesce(sum(${TtsGenerations.audio_size_bytes}) filter (where ${TtsGenerations.voice_mode} = 'default'), 0)`,
+      clonedInputCharacters: sql<number>`coalesce(sum(length(${TtsGenerations.input_text})) filter (where ${TtsGenerations.voice_mode} = 'clone'), 0)::int`,
+      clonedOutputBytes: sql<number>`coalesce(sum(${TtsGenerations.audio_size_bytes}) filter (where ${TtsGenerations.voice_mode} = 'clone'), 0)`,
       inputCharacters: sql<number>`coalesce(sum(length(${TtsGenerations.input_text})), 0)::int`,
       outputBytes: sql<number>`coalesce(sum(${TtsGenerations.audio_size_bytes}), 0)`,
     }).from(TtsGenerations).where(ttsFilter),
-    db.select({ credits: sql<number>`coalesce(sum(${BillingUsageLedger.charged_credits}), 0)` })
+    db.select({
+      credits: sql<number>`coalesce(sum(${BillingUsageLedger.charged_credits}), 0)`,
+      fileCredits: sql<number>`coalesce(sum(${BillingUsageLedger.charged_credits}) filter (where ${BillingUsageLedger.usage_type} = 'stt_seconds' and ${BillingUsageLedger.metadata}->>'transcriptionUuid' is not null), 0)`,
+      liveCredits: sql<number>`coalesce(sum(${BillingUsageLedger.charged_credits}) filter (where ${BillingUsageLedger.usage_type} = 'stt_seconds' and ${BillingUsageLedger.metadata}->>'sessionUuid' is not null), 0)`,
+      defaultTtsCredits: sql<number>`coalesce(sum(${BillingUsageLedger.charged_credits}) filter (where ${BillingUsageLedger.usage_type} = 'tts_characters' and exists (select 1 from tts_generations tg where tg.generation_uuid::text = ${BillingUsageLedger.metadata}->>'generationUuid' and tg.voice_mode = 'default')), 0)`,
+      clonedTtsCredits: sql<number>`coalesce(sum(${BillingUsageLedger.charged_credits}) filter (where ${BillingUsageLedger.usage_type} = 'tts_characters' and exists (select 1 from tts_generations tg where tg.generation_uuid::text = ${BillingUsageLedger.metadata}->>'generationUuid' and tg.voice_mode = 'clone')), 0)`,
+    })
       .from(BillingUsageLedger).where(billingFilter),
   ]);
   const fileTotal = Number(files?.total ?? 0);
@@ -627,6 +640,10 @@ export const getGpuOperationStatistics = async (query: Record<string, unknown>) 
         queued: Number(files?.queued ?? 0),
         processing: Number(files?.processing ?? 0),
         stalled: Number(files?.stalled ?? 0),
+        credits: Number(billing?.fileCredits ?? 0),
+        input: { value: Number(files?.audioSeconds ?? 0), unit: "seconds" },
+        output: { value: Number(files?.transcriptCharacters ?? 0), unit: "characters" },
+        supporting: { value: Number(files?.uploadedBytes ?? 0), unit: "bytes", label: "Uploaded audio" },
       },
       {
         key: "stt_live",
@@ -638,6 +655,10 @@ export const getGpuOperationStatistics = async (query: Record<string, unknown>) 
         queued: Number(sessions?.queued ?? 0),
         processing: Number(sessions?.processing ?? 0),
         stalled: Number(sessions?.stalled ?? 0),
+        credits: Number(billing?.liveCredits ?? 0),
+        input: { value: Number(sessions?.audioSeconds ?? 0), unit: "seconds" },
+        output: { value: Number(sessions?.transcriptCharacters ?? 0), unit: "characters" },
+        supporting: null,
       },
       {
         key: "tts_default",
@@ -649,6 +670,10 @@ export const getGpuOperationStatistics = async (query: Record<string, unknown>) 
         queued: Number(tts?.defaultQueued ?? 0),
         processing: Number(tts?.defaultProcessing ?? 0),
         stalled: Number(tts?.defaultStalled ?? 0),
+        credits: Number(billing?.defaultTtsCredits ?? 0),
+        input: { value: Number(tts?.defaultInputCharacters ?? 0), unit: "characters" },
+        output: { value: Number(tts?.defaultOutputBytes ?? 0), unit: "bytes" },
+        supporting: null,
       },
       {
         key: "tts_clone",
@@ -660,6 +685,10 @@ export const getGpuOperationStatistics = async (query: Record<string, unknown>) 
         queued: Number(tts?.clonedQueued ?? 0),
         processing: Number(tts?.clonedProcessing ?? 0),
         stalled: Number(tts?.clonedStalled ?? 0),
+        credits: Number(billing?.clonedTtsCredits ?? 0),
+        input: { value: Number(tts?.clonedInputCharacters ?? 0), unit: "characters" },
+        output: { value: Number(tts?.clonedOutputBytes ?? 0), unit: "bytes" },
+        supporting: null,
       },
     ],
   };

@@ -147,3 +147,7 @@ dist/
 
 # Generated TTS audio (runtime data)
 storage/
+
+# STT / TTS load-test outputs
+scripts/.stt-load-results/
+scripts/.tts-load-results/

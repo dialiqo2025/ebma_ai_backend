@@ -162,10 +162,19 @@ worker_loop() {
   local e2e_start upload_start code body uuid status ok
   local upload_sec poll_sec e2e_sec api_msg err_code err_msg
   local body_file poll_body poll_code attempt pstart inflight_id
+  local now_i end_i
+
+  echo "[w$worker] started pid=$$" >> "$OUT_DIR/logs/worker-${worker}.log"
 
   while [[ ! -f "$STOP_FLAG" ]]; do
     # Stop starting new work after duration; in-flight may finish after.
-    if awk -v now="$(now_epoch)" -v end="$END_EPOCH" 'BEGIN { exit (now + 0 >= end + 0) }'; then
+    # Compare integer epochs in bash (awk exit codes invert easily in `if`).
+    now_i=$(now_epoch)
+    now_i=${now_i%.*}
+    end_i=${END_EPOCH%.*}
+    if (( now_i >= end_i )); then
+      echo "[w$worker] stopping — duration reached (now=$now_i end=$end_i)" \
+        >> "$OUT_DIR/logs/worker-${worker}.log"
       break
     fi
 
@@ -241,6 +250,8 @@ worker_loop() {
         >> "$OUT_DIR/logs/worker-${worker}.log"
     fi
   done
+
+  echo "[w$worker] exited after seq=$seq" >> "$OUT_DIR/logs/worker-${worker}.log"
 }
 
 # Aggregate stats from rows finished at/before cutoff_epoch (empty = all).
@@ -404,10 +415,6 @@ is_milestone() {
   esac
 }
 
-export -f worker_loop write_row json_get http_indication elapsed_sec now_epoch
-export BASE_URL TOKEN FILE LANGUAGE DIARIZE POLL POLL_INTERVAL POLL_MAX TIMEOUT
-export OUT_DIR HAS_JQ STOP_FLAG END_EPOCH
-
 : > "$RUN_LOG"
 echo -e "label\telapsed_s\thits\tok\tfail\tsuccess_rate\tfail_rate\tin_flight\tupload_avg\tupload_p50\tupload_p95\te2e_avg\te2e_p50\te2e_p95" \
   > "$INTERVALS"
@@ -415,7 +422,10 @@ echo -e "label\telapsed_s\thits\tok\tfail\tsuccess_rate\tfail_rate\tin_flight\tu
 START_EPOCH=$(now_epoch)
 START_EPOCH_INT=${START_EPOCH%.*}
 END_EPOCH=$(awk -v s="$START_EPOCH" -v d="$DURATION_SEC" 'BEGIN { printf "%.3f", s + d }')
-export END_EPOCH
+
+export -f worker_loop write_row json_get http_indication elapsed_sec now_epoch
+export BASE_URL TOKEN FILE LANGUAGE DIARIZE POLL POLL_INTERVAL POLL_MAX TIMEOUT
+export OUT_DIR HAS_JQ STOP_FLAG END_EPOCH
 
 HOST=$(hostname 2>/dev/null || echo unknown)
 

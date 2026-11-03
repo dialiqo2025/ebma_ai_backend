@@ -30,6 +30,7 @@ import {
 import { TTS_EMOTION_OPTIONS, TTS_STYLE_TAG_GROUPS } from "./tts.emotion";
 import { ttsCloneSampleMaxBytes } from "./tts.upload";
 import { recordUsage } from "../billing/billing.provider";
+import { currentRequestContext } from "../observability/observability.context";
 import type {
   CreateTtsGeneration,
   ListTtsGenerations,
@@ -169,6 +170,7 @@ export const createTtsGeneration = async (
       user_uuid: userUuid,
       project_uuid: projectUuid ?? null,
       api_key_uuid: apiKeyUuid ?? null,
+      request_id: currentRequestContext()?.requestId ?? null,
       input_text: payload.text,
       language: payload.language,
       voice_mode: payload.voiceMode,
@@ -435,6 +437,7 @@ export const generateTtsAudio = async (generationUuid: string, userUuid: string)
     .update(TtsGenerations)
     .set({
       status: "processing",
+      request_id: currentRequestContext()?.requestId ?? generation.request_id,
       started_at: new Date(),
       completed_at: null,
       error_code: null,
@@ -656,6 +659,7 @@ export const prepareTtsStream = async (
     .update(TtsGenerations)
     .set({
       status: "processing",
+      request_id: currentRequestContext()?.requestId ?? generation.request_id,
       started_at: new Date(),
       completed_at: null,
       error_code: null,

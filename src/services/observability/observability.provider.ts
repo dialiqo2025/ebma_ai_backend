@@ -1,13 +1,15 @@
 import { mkdir, readdir, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { and, desc, eq, gte, ilike, isNotNull, lte, lt, or, sql } from "drizzle-orm";
+import { and, desc, eq, gte, ilike, inArray, isNotNull, lte, lt, or, sql } from "drizzle-orm";
 import { db } from "../../config/database/connection.database";
 import {
   ApiTransactionLogs,
   GpuServiceLogs,
   ObservabilitySettings,
   SttTranscriptions,
+  TtsGenerations,
+  BillingUsageLedger,
   Users,
 } from "../../schema";
 import { currentRequestContext } from "./observability.context";
@@ -306,6 +308,311 @@ export const listGpuTransactions = async (query: Record<string, unknown>) => {
     .offset((page - 1) * pageSize);
   const total = Number(countRow?.count ?? 0);
   return { items: items.map(({ log, ...user }) => ({ ...log, ...user })), pagination: { page, pageSize, total, totalPages: Math.ceil(total / pageSize), hasNextPage: page * pageSize < total } };
+};
+
+const operationStatus = (status: string) =>
+  status === "completed" ? "success" : ["failed", "cancelled"].includes(status) ? "failed" : "processing";
+
+/** One row per user-visible STT transcription or TTS generation. */
+export const listGpuOperations = async (query: Record<string, unknown>) => {
+  const page = pageInput(query.page, 1, 1_000_000);
+  const pageSize = pageInput(query.pageSize, 25, 100);
+  const offset = (page - 1) * pageSize;
+  const take = offset + pageSize;
+  const search = typeof query.search === "string" ? query.search.trim() : "";
+  const requestedFrom = dateInput(query.from);
+  const retention = requestedFrom ? null : await getObservabilitySettings();
+  const from = requestedFrom ?? new Date(Date.now() - (retention?.retention_days ?? 7) * 86_400_000);
+  const to = dateInput(query.to);
+  const userUuid = userUuidInput(query.userUuid);
+  const requestedStatus = ["success", "failed", "processing"].includes(String(query.status)) ? String(query.status) : undefined;
+  const includeStt = query.service !== "tts";
+  const includeTts = query.service !== "stt";
+  const sttStatus = requestedStatus === "success"
+    ? eq(SttTranscriptions.status, "completed")
+    : requestedStatus === "failed"
+      ? sql`${SttTranscriptions.status} in ('failed', 'cancelled')`
+      : requestedStatus === "processing"
+        ? sql`${SttTranscriptions.status} not in ('completed', 'failed', 'cancelled')`
+        : undefined;
+  const ttsStatus = requestedStatus === "success"
+    ? eq(TtsGenerations.status, "completed")
+    : requestedStatus === "failed"
+      ? eq(TtsGenerations.status, "failed")
+      : requestedStatus === "processing"
+        ? sql`${TtsGenerations.status} not in ('completed', 'failed')`
+        : undefined;
+  const sttFilters = and(
+    sttStatus,
+    userUuid ? eq(SttTranscriptions.user_uuid, userUuid) : undefined,
+    from ? gte(SttTranscriptions.created_at, from) : undefined,
+    to ? lte(SttTranscriptions.created_at, to) : undefined,
+    search ? or(ilike(SttTranscriptions.original_filename, `%${search}%`), ilike(Users.email, `%${search}%`), ilike(Users.fullName, `%${search}%`)) : undefined,
+  );
+  const ttsFilters = and(
+    ttsStatus,
+    userUuid ? eq(TtsGenerations.user_uuid, userUuid) : undefined,
+    from ? gte(TtsGenerations.created_at, from) : undefined,
+    to ? lte(TtsGenerations.created_at, to) : undefined,
+    search ? or(ilike(TtsGenerations.input_text, `%${search}%`), ilike(Users.email, `%${search}%`), ilike(Users.fullName, `%${search}%`)) : undefined,
+  );
+
+  const [sttRows, ttsRows, sttCount, ttsCount] = await Promise.all([
+    includeStt
+      ? db.select({ operation: SttTranscriptions, userEmail: Users.email, userName: Users.fullName }).from(SttTranscriptions)
+          .leftJoin(Users, eq(SttTranscriptions.user_uuid, Users.user_uuid)).where(sttFilters)
+          .orderBy(desc(SttTranscriptions.created_at)).limit(take)
+      : Promise.resolve([]),
+    includeTts
+      ? db.select({ operation: TtsGenerations, userEmail: Users.email, userName: Users.fullName }).from(TtsGenerations)
+          .leftJoin(Users, eq(TtsGenerations.user_uuid, Users.user_uuid)).where(ttsFilters)
+          .orderBy(desc(TtsGenerations.created_at)).limit(take)
+      : Promise.resolve([]),
+    includeStt ? db.select({ count: sql<number>`count(*)::int` }).from(SttTranscriptions).leftJoin(Users, eq(SttTranscriptions.user_uuid, Users.user_uuid)).where(sttFilters) : Promise.resolve([{ count: 0 }]),
+    includeTts ? db.select({ count: sql<number>`count(*)::int` }).from(TtsGenerations).leftJoin(Users, eq(TtsGenerations.user_uuid, Users.user_uuid)).where(ttsFilters) : Promise.resolve([{ count: 0 }]),
+  ]);
+
+  const operations = [
+    ...sttRows.map(({ operation, ...user }) => ({
+      operationUuid: operation.transcription_uuid,
+      service: "stt" as const,
+      operationType: "transcription",
+      status: operationStatus(operation.status),
+      rawStatus: operation.status,
+      title: operation.original_filename,
+      userUuid: operation.user_uuid,
+      ...user,
+      requestId: operation.request_id,
+      providerReference: operation.provider_job_id,
+      fileSizeBytes: operation.file_size_bytes,
+      inputUnits: operation.file_size_bytes,
+      outputUnits: operation.transcript.length,
+      audioSeconds: operation.audio_seconds,
+      errorCode: operation.error_code,
+      errorMessage: operation.error_message,
+      createdAt: operation.created_at,
+      startedAt: operation.created_at,
+      completedAt: operation.completed_at,
+    })),
+    ...ttsRows.map(({ operation, ...user }) => ({
+      operationUuid: operation.generation_uuid,
+      service: "tts" as const,
+      operationType: "generation",
+      status: operationStatus(operation.status),
+      rawStatus: operation.status,
+      title: truncate(operation.input_text, 120),
+      userUuid: operation.user_uuid,
+      ...user,
+      requestId: operation.request_id,
+      providerReference: operation.provider_request_id,
+      fileSizeBytes: operation.audio_size_bytes,
+      inputUnits: operation.input_text.length,
+      outputUnits: operation.audio_size_bytes,
+      audioSeconds: null,
+      errorCode: operation.error_code,
+      errorMessage: operation.error_message,
+      createdAt: operation.created_at,
+      startedAt: operation.started_at ?? operation.created_at,
+      completedAt: operation.completed_at,
+    })),
+  ].sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime()).slice(offset, offset + pageSize);
+
+  const sttIds = operations.filter((item) => item.service === "stt").map((item) => item.operationUuid);
+  const ttsIds = operations.filter((item) => item.service === "tts").map((item) => item.operationUuid);
+  const usageRows = sttIds.length || ttsIds.length
+    ? await db.select().from(BillingUsageLedger).where(or(
+        sttIds.length ? inArray(sql<string>`${BillingUsageLedger.metadata}->>'transcriptionUuid'`, sttIds) : undefined,
+        ttsIds.length ? inArray(sql<string>`${BillingUsageLedger.metadata}->>'generationUuid'`, ttsIds) : undefined,
+      ))
+    : [];
+  const total = Number(sttCount[0]?.count ?? 0) + Number(ttsCount[0]?.count ?? 0);
+  return {
+    items: operations.map((operation) => {
+      const usage = usageRows.filter((row) => {
+        const metadata = row.metadata as { transcriptionUuid?: unknown; generationUuid?: unknown } | null;
+        return metadata?.transcriptionUuid === operation.operationUuid || metadata?.generationUuid === operation.operationUuid;
+      });
+      return { ...operation, chargedCredits: usage.reduce((sum, row) => sum + Number(row.charged_credits), 0), usageEvents: usage.length };
+    }),
+    pagination: { page, pageSize, total, totalPages: Math.ceil(total / pageSize), hasNextPage: offset + operations.length < total },
+  };
+};
+
+export const getGpuOperationDetails = async (service: unknown, operationUuid: string) => {
+  if (service !== "stt" && service !== "tts") return null;
+  const [domainRow] = service === "stt"
+    ? await db.select({ operation: SttTranscriptions, userEmail: Users.email, userName: Users.fullName })
+        .from(SttTranscriptions).leftJoin(Users, eq(SttTranscriptions.user_uuid, Users.user_uuid))
+        .where(eq(SttTranscriptions.transcription_uuid, operationUuid)).limit(1)
+    : await db.select({ operation: TtsGenerations, userEmail: Users.email, userName: Users.fullName })
+        .from(TtsGenerations).leftJoin(Users, eq(TtsGenerations.user_uuid, Users.user_uuid))
+        .where(eq(TtsGenerations.generation_uuid, operationUuid)).limit(1);
+  if (!domainRow) return null;
+
+  const operation: any = domainRow.operation;
+  const metadataId = service === "stt" ? "transcriptionUuid" : "generationUuid";
+  const usageRows = await db.select().from(BillingUsageLedger)
+    .where(sql`${BillingUsageLedger.metadata}->>${metadataId} = ${operationUuid}`)
+    .orderBy(desc(BillingUsageLedger.created_at));
+  const requestIds = [...new Set([
+    operation.request_id,
+    ...usageRows.map((row) => row.request_id),
+  ].filter((value): value is string => Boolean(value)))];
+  const providerReferences = [...new Set([
+    service === "stt" ? operation.provider_job_id : operation.provider_request_id,
+    ...usageRows.map((row) => row.provider_reference),
+  ].filter((value): value is string => Boolean(value)))];
+  const gpuIdFilter = service === "stt"
+    ? sql`${GpuServiceLogs.request_metadata}->>'transcriptionUuid' = ${operationUuid}`
+    : undefined;
+  const timeCorrelationFallback = service === "tts" && !requestIds.length && !providerReferences.length
+    ? and(
+        eq(GpuServiceLogs.user_uuid, operation.user_uuid),
+        gte(GpuServiceLogs.created_at, new Date(operation.created_at.getTime() - 30_000)),
+        lte(GpuServiceLogs.created_at, new Date((operation.completed_at ?? operation.updated_at).getTime() + 30_000)),
+      )
+    : undefined;
+  const gpuLogs = await db.select().from(GpuServiceLogs).where(and(
+    eq(GpuServiceLogs.service, service),
+    or(
+      requestIds.length ? inArray(GpuServiceLogs.request_id, requestIds) : undefined,
+      providerReferences.length ? inArray(GpuServiceLogs.provider_reference, providerReferences) : undefined,
+      gpuIdFilter,
+      timeCorrelationFallback,
+    ),
+  )).orderBy(desc(GpuServiceLogs.created_at));
+  const allRequestIds = [...new Set([
+    ...requestIds,
+    ...gpuLogs.map((log) => log.request_id).filter((value): value is string => Boolean(value)),
+  ])];
+  const apiLogs = allRequestIds.length
+    ? await db.select().from(ApiTransactionLogs).where(inArray(ApiTransactionLogs.request_id, allRequestIds)).orderBy(desc(ApiTransactionLogs.created_at))
+    : [];
+
+  const createdAt: Date = operation.created_at;
+  const completedAt: Date | null = operation.completed_at;
+  const stages = [
+    {
+      id: `accepted:${operationUuid}`,
+      type: "lifecycle",
+      name: "Request accepted",
+      status: "success",
+      startedAt: createdAt,
+      completedAt: createdAt,
+      durationMs: 0,
+      endpoint: null,
+      description: `${service.toUpperCase()} operation was accepted and persisted`,
+      request: service === "stt"
+        ? { filename: operation.original_filename, contentType: operation.content_type, fileSizeBytes: operation.file_size_bytes, language: operation.language, diarize: operation.diarize, speakers: operation.speakers }
+        : { text: operation.input_text, characters: operation.input_text.length, language: operation.language, voiceMode: operation.voice_mode, outputFormat: operation.audio_format, speed: operation.speed, pitch: operation.pitch },
+      response: { operationUuid, status: operation.status },
+    },
+    ...apiLogs.map((log) => ({
+      id: `api:${log.log_uuid}`,
+      type: "api",
+      name: `${log.method} ${log.functionality}`,
+      status: log.status,
+      startedAt: new Date(log.created_at.getTime() - log.duration_ms),
+      completedAt: log.created_at,
+      durationMs: log.duration_ms,
+      endpoint: log.path,
+      description: log.description,
+      request: log.request_metadata,
+      response: log.response_metadata,
+      httpStatus: log.http_status,
+      errorCode: log.error_code,
+      errorMessage: log.error_message,
+    })),
+    ...gpuLogs.map((log) => ({
+      id: `gpu:${log.log_uuid}`,
+      type: "gpu",
+      name: `${log.service.toUpperCase()} ${log.operation.replaceAll("_", " ")}`,
+      status: log.status,
+      startedAt: new Date(log.created_at.getTime() - log.duration_ms),
+      completedAt: log.created_at,
+      durationMs: log.duration_ms,
+      endpoint: log.endpoint,
+      description: log.description,
+      request: log.request_metadata,
+      response: log.response_metadata,
+      httpStatus: log.upstream_status,
+      errorCode: log.error_code,
+      errorMessage: log.error_message,
+      artifactLogUuid: log.artifact_file_name ? log.log_uuid : null,
+      artifactOriginalName: log.artifact_original_name,
+    })),
+    ...usageRows.map((usage) => ({
+      id: `billing:${usage.usage_uuid}`,
+      type: "billing",
+      name: "Usage measured and credits charged",
+      status: "success",
+      startedAt: usage.created_at,
+      completedAt: usage.created_at,
+      durationMs: 0,
+      endpoint: null,
+      description: `${Number(usage.quantity)} ${usage.usage_type === "stt_seconds" ? "seconds" : usage.usage_type === "tts_characters" ? "characters" : "tokens"} × ${Number(usage.unit_price_credits)} credits`,
+      request: { usageType: usage.usage_type, quantity: Number(usage.quantity), unitPriceCredits: Number(usage.unit_price_credits) },
+      response: { chargedCredits: Number(usage.charged_credits), idempotencyKey: usage.idempotency_key },
+    })),
+    ...(completedAt ? [{
+      id: `completed:${operationUuid}`,
+      type: "lifecycle",
+      name: operation.status === "completed" ? "Response ready" : "Operation closed",
+      status: operation.status === "completed" ? "success" : "failed",
+      startedAt: completedAt,
+      completedAt,
+      durationMs: 0,
+      endpoint: null,
+      description: operation.status === "completed" ? "The final result was persisted and made available to the user" : operation.error_message || `Operation ended with status ${operation.status}`,
+      request: null,
+      response: service === "stt"
+        ? { status: operation.status, audioSeconds: operation.audio_seconds, transcriptCharacters: operation.transcript.length }
+        : { status: operation.status, audioSizeBytes: operation.audio_size_bytes, format: operation.audio_format },
+      errorCode: operation.error_code,
+      errorMessage: operation.error_message,
+    }] : []),
+  ].sort((left, right) => left.startedAt.getTime() - right.startedAt.getTime());
+
+  const billing = usageRows.map((row) => ({
+    usageUuid: row.usage_uuid,
+    usageType: row.usage_type,
+    quantity: Number(row.quantity),
+    unitPriceCredits: Number(row.unit_price_credits),
+    chargedCredits: Number(row.charged_credits),
+    metadata: row.metadata,
+    createdAt: row.created_at,
+  }));
+  return {
+    operation: {
+      operationUuid,
+      service,
+      operationType: service === "stt" ? "transcription" : "generation",
+      status: operationStatus(operation.status),
+      rawStatus: operation.status,
+      userUuid: operation.user_uuid,
+      userEmail: domainRow.userEmail,
+      userName: domainRow.userName,
+      requestId: operation.request_id,
+      providerReference: service === "stt" ? operation.provider_job_id : operation.provider_request_id,
+      createdAt,
+      startedAt: operation.started_at ?? createdAt,
+      completedAt,
+      totalDurationMs: completedAt ? completedAt.getTime() - (operation.started_at ?? createdAt).getTime() : Date.now() - createdAt.getTime(),
+      errorCode: operation.error_code,
+      errorMessage: operation.error_message,
+      metrics: service === "stt"
+        ? { originalFilename: operation.original_filename, contentType: operation.content_type, uploadedBytes: operation.file_size_bytes, audioSeconds: operation.audio_seconds, transcriptCharacters: operation.transcript.length, language: operation.language }
+        : { inputCharacters: operation.input_text.length, outputAudioBytes: operation.audio_size_bytes, outputFormat: operation.audio_format, language: operation.language, voiceMode: operation.voice_mode },
+      input: service === "stt" ? { filename: operation.original_filename } : { text: operation.input_text },
+      output: service === "stt" ? { transcript: operation.transcript, result: operation.result_json } : { audioFileName: operation.audio_file_name, mimeType: operation.audio_mime_type },
+    },
+    billing: {
+      items: billing,
+      totalCredits: billing.reduce((sum, item) => sum + item.chargedCredits, 0),
+    },
+    stages,
+    related: { apiCalls: apiLogs.length, gpuCalls: gpuLogs.length, billingEvents: usageRows.length },
+  };
 };
 
 export const listObservedUsers = async (query: Record<string, unknown>) => {

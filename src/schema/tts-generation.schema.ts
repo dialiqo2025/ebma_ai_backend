@@ -23,6 +23,7 @@ export const TtsGenerations = pgTable("tts_generations", {
     .references(() => Users.user_uuid, { onDelete: "cascade" }),
   project_uuid: uuid("project_uuid").references(() => Projects.project_uuid, { onDelete: "set null" }),
   api_key_uuid: uuid("api_key_uuid").references(() => ApiKeys.key_uuid, { onDelete: "set null" }),
+  request_id: uuid("request_id"),
   input_text: text("input_text").notNull(),
   language: varchar("language", { length: 32 }).default("auto").notNull(),
   voice_mode: ttsVoiceModeEnum("voice_mode").default("default").notNull(),

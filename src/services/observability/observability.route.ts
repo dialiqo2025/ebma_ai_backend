@@ -5,8 +5,10 @@ import { HttpStatusCodes as Code } from "../../utils/httpType.util";
 import {
   cleanupExpiredObservabilityLogs,
   getObservabilitySettings,
+  getGpuOperationDetails,
   listApiTransactions,
   listGpuTransactions,
+  listGpuOperations,
   listObservedUsers,
   monitoredArtifact,
   monitoredTranscript,
@@ -22,6 +24,24 @@ router.get("/api-transactions", superAdmin, async (req, res, next) => {
 });
 router.get("/gpu-transactions", superAdmin, async (req, res, next) => {
   try { send(res, await listGpuTransactions(req.query)); } catch (error) { next(error); }
+});
+router.get("/gpu-operations", superAdmin, async (req, res, next) => {
+  try { send(res, await listGpuOperations(req.query), "GPU operations fetched successfully"); } catch (error) { next(error); }
+});
+router.get("/gpu-operations/:service/:operation_uuid", superAdmin, async (req, res, next) => {
+  try {
+    const operationUuid = String(req.params.operation_uuid || "");
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(operationUuid)) {
+      res.status(400).json(GenResObj(Code.BAD_REQUEST, false, "A valid operation id is required").data);
+      return;
+    }
+    const details = await getGpuOperationDetails(req.params.service, operationUuid);
+    if (!details) {
+      res.status(404).json(GenResObj(Code.NOT_FOUND, false, "GPU operation was not found").data);
+      return;
+    }
+    send(res, details, "GPU operation details fetched successfully");
+  } catch (error) { next(error); }
 });
 router.get("/users", superAdmin, async (req, res, next) => {
   try { send(res, await listObservedUsers(req.query)); } catch (error) { next(error); }

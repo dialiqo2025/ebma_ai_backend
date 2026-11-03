@@ -139,7 +139,10 @@ const modelFetch = async (
   init: RequestInit,
   timeout = timeoutMs(),
 ) => {
-  const { baseUrl, apiKey } = modelConfiguration();
+  // Resolve the display endpoint without throwing so even a missing GPU
+  // configuration is captured as a failed monitored upload with its source file.
+  const observedBaseUrl = process.env.EBMA_ASR_BACKEND_URL?.trim().replace(/\/+$/, "")
+    || "unconfigured://ebma-asr";
 
   const method = String(init.method || "GET").toUpperCase();
   const operation = path.startsWith("/v1/transcriptions")
@@ -153,7 +156,7 @@ const modelFetch = async (
   return observeGpuCall<Response>({
     service: "stt",
     operation,
-    endpoint: `${baseUrl}${path}`,
+    endpoint: `${observedBaseUrl}${path}`,
     requestMetadata: { method, byteLength: uploadBody?.length, contentType: (init.headers as Record<string, string> | undefined)?.["Content-Type"] },
     responseMetadata: (response) => ({ status: response.status, contentType: response.headers.get("content-type") }),
     isSuccess: (response) => response.ok || (method === "DELETE" && response.status === 404),
@@ -167,6 +170,7 @@ const modelFetch = async (
     } } : {}),
   }, async () => {
     try {
+      const { baseUrl, apiKey } = modelConfiguration();
       return await fetch(`${baseUrl}${path}`, {
         ...init,
         headers: {
@@ -176,6 +180,7 @@ const modelFetch = async (
         signal: AbortSignal.timeout(timeout),
       });
     } catch (error) {
+      if (error instanceof SttModelError) throw error;
       const timedOut = error instanceof Error && error.name === "TimeoutError";
       throw new SttModelError(
         timedOut ? "The EBMA ASR request timed out" : "The EBMA ASR backend is unavailable",

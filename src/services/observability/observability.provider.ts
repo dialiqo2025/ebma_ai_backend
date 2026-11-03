@@ -588,7 +588,11 @@ export const getGpuOperationStatistics = async (query: Record<string, unknown>) 
     successRequests: success,
     failedRequests: failed,
     queuedRequests: queued,
-    processingRequests: processing,
+    // Backward compatibility for the earlier combined "Processing / queued"
+    // dashboard card. New clients use activeProcessingRequests for the
+    // processing-only card and queuedRequests for the queue card.
+    processingRequests: queued + processing,
+    activeProcessingRequests: processing,
     stalledRequests: stalled,
     stalledAfterMinutes: gpuOperationStalledAfterMinutes(),
     successRate: total ? (success / total) * 100 : 0,

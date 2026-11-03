@@ -1,7 +1,7 @@
 import { mkdir, readdir, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { and, desc, eq, gte, ilike, lte, lt, or, sql } from "drizzle-orm";
+import { and, desc, eq, gte, ilike, isNotNull, lte, lt, or, sql } from "drizzle-orm";
 import { db } from "../../config/database/connection.database";
 import {
   ApiTransactionLogs,
@@ -209,6 +209,33 @@ export const recordSttResultObservation = async (input: {
   });
 };
 
+/** Attach the provider job id after the upload response body has been parsed. */
+export const linkCurrentSttUpload = (providerReference: string) => {
+  const context = currentRequestContext();
+  const requestId = context?.requestId;
+  if (!requestId || !providerReference) return;
+
+  const link = async (attempt: number): Promise<void> => {
+    try {
+      const updated = await db.update(GpuServiceLogs)
+        .set({ provider_reference: truncate(providerReference, 255) })
+        .where(and(
+          eq(GpuServiceLogs.request_id, requestId),
+          eq(GpuServiceLogs.service, "stt"),
+          eq(GpuServiceLogs.operation, "create_transcription"),
+        ))
+        .returning({ logUuid: GpuServiceLogs.log_uuid });
+      if (updated.length || attempt >= 6) return;
+      setTimeout(() => void link(attempt + 1), attempt * 400).unref();
+    } catch (error) {
+      if (attempt >= 6) console.error("STT upload monitoring link failed:", error);
+      else setTimeout(() => void link(attempt + 1), attempt * 400).unref();
+    }
+  };
+
+  void link(1);
+};
+
 const pageInput = (value: unknown, fallback: number, max: number) => {
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed > 0 ? Math.min(parsed, max) : fallback;
@@ -324,8 +351,44 @@ export const updateObservabilitySettings = async (retentionDays: number, userUui
 
 export const monitoredArtifact = async (logUuid: string) => {
   const [row] = await db.select().from(GpuServiceLogs).where(eq(GpuServiceLogs.log_uuid, logUuid)).limit(1);
-  if (!row?.artifact_file_name) return null;
-  return { path: path.join(artifactDirectory, path.basename(row.artifact_file_name)), name: row.artifact_original_name || "transcription-audio", contentType: row.artifact_content_type || "application/octet-stream" };
+  if (!row) return null;
+  let source = row.artifact_file_name ? row : undefined;
+
+  // Result rows are separate from upload-call rows. Prefer an exact provider
+  // reference, then use transcription metadata for records created before the
+  // correlation link was introduced.
+  if (!source && row.service === "stt" && row.operation === "transcription_result") {
+    if (row.provider_reference) {
+      [source] = await db.select().from(GpuServiceLogs).where(and(
+        eq(GpuServiceLogs.service, "stt"),
+        eq(GpuServiceLogs.operation, "create_transcription"),
+        eq(GpuServiceLogs.provider_reference, row.provider_reference),
+        isNotNull(GpuServiceLogs.artifact_file_name),
+      )).orderBy(desc(GpuServiceLogs.created_at)).limit(1);
+    }
+
+    if (!source) {
+      const transcriptionUuid = (row.request_metadata as { transcriptionUuid?: unknown } | null)?.transcriptionUuid;
+      if (typeof transcriptionUuid === "string") {
+        const [transcription] = await db.select().from(SttTranscriptions)
+          .where(eq(SttTranscriptions.transcription_uuid, transcriptionUuid)).limit(1);
+        if (transcription) {
+          [source] = await db.select().from(GpuServiceLogs).where(and(
+            eq(GpuServiceLogs.service, "stt"),
+            eq(GpuServiceLogs.operation, "create_transcription"),
+            eq(GpuServiceLogs.user_uuid, transcription.user_uuid),
+            eq(GpuServiceLogs.artifact_original_name, transcription.original_filename),
+            isNotNull(GpuServiceLogs.artifact_file_name),
+            gte(GpuServiceLogs.created_at, new Date(transcription.created_at.getTime() - 5 * 60_000)),
+            lte(GpuServiceLogs.created_at, new Date(transcription.created_at.getTime() + 5 * 60_000)),
+          )).orderBy(desc(GpuServiceLogs.created_at)).limit(1);
+        }
+      }
+    }
+  }
+
+  if (!source?.artifact_file_name) return null;
+  return { path: path.join(artifactDirectory, path.basename(source.artifact_file_name)), name: source.artifact_original_name || "transcription-audio", contentType: source.artifact_content_type || "application/octet-stream" };
 };
 
 export const monitoredTranscript = async (logUuid: string) => {

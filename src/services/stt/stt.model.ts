@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { observeGpuCall } from "../observability/observability.provider";
+import { linkCurrentSttUpload, observeGpuCall } from "../observability/observability.provider";
 
 const tokenResponseValidator = z.object({
   token: z.string().min(1),
@@ -379,7 +379,9 @@ export const createTranscriptionJob = async (input: CreateTranscriptionJobInput)
   }
 
   try {
-    return jobCreatedValidator.parse(await response.json());
+    const created = jobCreatedValidator.parse(await response.json());
+    linkCurrentSttUpload(created.job_id);
+    return created;
   } catch {
     throw new SttModelError(
       "The EBMA ASR backend returned an invalid transcription job response",

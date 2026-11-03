@@ -28,6 +28,7 @@ router.get("/admin/rates", superAdmin, BillingController.adminRates);
 router.put("/admin/rates", superAdmin, BillingController.adminRates);
 router.get("/admin/usage-overview", superAdmin, BillingController.adminUsageOverview);
 router.get("/admin/user-usage", superAdmin, BillingController.adminUserUsage);
+router.get("/admin/users/:user_uuid/usage-events", superAdmin, BillingController.adminUserUsageEvents);
 router.get("/admin/signup-free-credits", superAdmin, BillingController.adminSignupFreeCredits);
 router.put("/admin/signup-free-credits", superAdmin, BillingController.adminSignupFreeCredits);
 router.get("/admin/subscriptions", superAdmin, BillingController.adminSubscriptions);

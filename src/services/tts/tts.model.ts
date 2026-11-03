@@ -1,5 +1,6 @@
 import { audioMimeTypeByFormat } from "./tts.helper";
 import { applyEmotionPrefix } from "./tts.emotion";
+import { observeGpuCall } from "../observability/observability.provider";
 
 const DEFAULT_TIMEOUT_MS = 60_000;
 const DEFAULT_MAX_AUDIO_BYTES = 25 * 1024 * 1024;
@@ -96,6 +97,22 @@ const buildModelHeaders = () => {
   return headers;
 };
 
+const observedTtsFetch = (
+  endpoint: string,
+  init: RequestInit,
+  operation: string,
+  metadata: Record<string, unknown> = {},
+) => observeGpuCall<Response>({
+  service: "tts",
+  operation,
+  endpoint,
+  requestMetadata: { method: init.method || "GET", ...metadata },
+  responseMetadata: (response) => ({ status: response.status, contentType: response.headers.get("content-type"), requestId: response.headers.get("x-request-id") || response.headers.get("request-id") }),
+  providerReference: (response) => response.headers.get("x-request-id") || response.headers.get("request-id") || undefined,
+  isSuccess: (response) => response.ok || (operation === "health_check" && response.status === 405),
+  upstreamStatus: (response) => response.status,
+}, () => fetch(endpoint, init));
+
 /**
  * Check whether the configured TTS processor is reachable without generating
  * billable audio. An explicit health URL is preferred; otherwise OPTIONS on
@@ -117,13 +134,13 @@ export const getTtsModelHealth = async () => {
 
   let response: Response;
   try {
-    response = await fetch(endpoint, {
+    response = await observedTtsFetch(endpoint, {
       method: configuredHealthEndpoint ? "GET" : "OPTIONS",
       headers: buildModelHeaders(),
       signal: AbortSignal.timeout(
         positiveIntegerFromEnvironment("TTS_MODEL_HEALTH_TIMEOUT_MS", 10_000),
       ),
-    });
+    }, "health_check");
   } catch {
     throw new TtsModelError(
       "Text-to-speech processing is temporarily unavailable. Please try again later or contact your administrator.",
@@ -252,14 +269,14 @@ export const openTtsModelStream = async (
 
   let response: Response;
   try {
-    response = await fetch(endpoint, {
+    response = await observedTtsFetch(endpoint, {
       method: "POST",
       headers: buildModelHeaders(),
       body: JSON.stringify(buildSpeechRequestBody(input, true)),
       signal: AbortSignal.timeout(
         positiveIntegerFromEnvironment("TTS_MODEL_TIMEOUT_MS", DEFAULT_TIMEOUT_MS),
       ),
-    });
+    }, "stream_synthesis", { textCharacters: input.text.length, language: input.language, voiceMode: input.voiceMode, outputFormat: input.outputFormat });
   } catch (error) {
     const timedOut = error instanceof Error && error.name === "TimeoutError";
     throw new TtsModelError(
@@ -309,14 +326,14 @@ export const synthesizeWithTtsModel = async (
 
   let response: Response;
   try {
-    response = await fetch(endpoint, {
+    response = await observedTtsFetch(endpoint, {
       method: "POST",
       headers: buildModelHeaders(),
       body: JSON.stringify(buildSpeechRequestBody(input, false)),
       signal: AbortSignal.timeout(
         positiveIntegerFromEnvironment("TTS_MODEL_TIMEOUT_MS", DEFAULT_TIMEOUT_MS),
       ),
-    });
+    }, "synthesis", { textCharacters: input.text.length, language: input.language, voiceMode: input.voiceMode, outputFormat: input.outputFormat });
   } catch (error) {
     const timedOut = error instanceof Error && error.name === "TimeoutError";
     throw new TtsModelError(

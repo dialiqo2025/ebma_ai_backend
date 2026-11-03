@@ -17,6 +17,7 @@ import {
   resolveRatesFromPlan,
   roundCredits,
 } from "./billing.rates";
+import { currentRequestContext } from "../observability/observability.context";
 
 export const BILLING_PRICES = {
   tts_characters: Number(process.env.BILLING_TTS_CREDITS_PER_CHARACTER ?? 0.03),
@@ -197,6 +198,7 @@ export const recordUsage = async (input: {
         user_uuid: input.userUuid,
         project_uuid: input.projectUuid ?? null,
         api_key_uuid: input.apiKeyUuid ?? null,
+        request_id: currentRequestContext()?.requestId ?? null,
         usage_type: input.type,
         quantity: input.quantity.toFixed(6),
         unit_price_credits: unitPrice.toFixed(6),

@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gte, ilike, lte, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, ilike, inArray, lte, or, sql } from "drizzle-orm";
 import { db } from "../../config/database/connection.database";
 import {
   BillingPlans,
@@ -9,6 +9,8 @@ import {
   BillingUsageLedger,
   BillingWallets,
   EnterprisePlanRequests,
+  ApiTransactionLogs,
+  GpuServiceLogs,
   Users,
 } from "../../schema";
 import { ensureDefaultPaygSubscription, ensureWallet, getSignupFreeCredits } from "./billing.provider";
@@ -457,6 +459,73 @@ export const getAdminUserUsage = async (
       sttQuantity: Number(row.sttQuantity),
       ttsQuantity: Number(row.ttsQuantity),
       llmQuantity: Number(row.llmQuantity),
+    })),
+    pagination: {
+      page: safePage,
+      pageSize: safeLimit,
+      total,
+      totalPages: Math.ceil(total / safeLimit),
+      hasNextPage: offset + rows.length < total,
+    },
+  });
+};
+
+export const getAdminUserUsageEvents = async (
+  userUuid: string,
+  from: Date,
+  to: Date,
+  page = 1,
+  limit = 20,
+) => {
+  const safePage = Math.max(1, Math.floor(page));
+  const safeLimit = Math.min(100, Math.max(1, Math.floor(limit)));
+  const offset = (safePage - 1) * safeLimit;
+  const filters = and(
+    eq(BillingUsageLedger.user_uuid, userUuid),
+    gte(BillingUsageLedger.created_at, from),
+    lte(BillingUsageLedger.created_at, to),
+  );
+  const [[countRow], rows] = await Promise.all([
+    db.select({ count: sql<number>`count(*)::int` }).from(BillingUsageLedger).where(filters),
+    db.select().from(BillingUsageLedger).where(filters)
+      .orderBy(desc(BillingUsageLedger.created_at))
+      .limit(safeLimit)
+      .offset(offset),
+  ]);
+
+  const requestIds = [...new Set(rows.map((row) => row.request_id).filter((value): value is string => Boolean(value)))];
+  const providerReferences = [...new Set(rows.map((row) => row.provider_reference).filter((value): value is string => Boolean(value)))];
+  const [apiLogs, gpuLogs] = await Promise.all([
+    requestIds.length
+      ? db.select().from(ApiTransactionLogs).where(inArray(ApiTransactionLogs.request_id, requestIds))
+      : Promise.resolve([]),
+    requestIds.length || providerReferences.length
+      ? db.select().from(GpuServiceLogs).where(or(
+          requestIds.length ? inArray(GpuServiceLogs.request_id, requestIds) : undefined,
+          providerReferences.length ? inArray(GpuServiceLogs.provider_reference, providerReferences) : undefined,
+        )).orderBy(desc(GpuServiceLogs.created_at))
+      : Promise.resolve([]),
+  ]);
+
+  const total = Number(countRow?.count ?? 0);
+  return GenResObj(Code.OK, true, "Per-request user usage fetched successfully", {
+    items: rows.map((row) => ({
+      usageUuid: row.usage_uuid,
+      requestId: row.request_id,
+      usageType: row.usage_type,
+      quantity: Number(row.quantity),
+      unitPriceCredits: Number(row.unit_price_credits),
+      chargedCredits: Number(row.charged_credits),
+      providerReference: row.provider_reference,
+      metadata: row.metadata,
+      createdAt: row.created_at.toISOString(),
+      apiTransaction: row.request_id
+        ? apiLogs.find((log) => log.request_id === row.request_id) ?? null
+        : null,
+      gpuTransactions: gpuLogs.filter((log) =>
+        (row.request_id && log.request_id === row.request_id) ||
+        (row.provider_reference && log.provider_reference === row.provider_reference),
+      ),
     })),
     pagination: {
       page: safePage,

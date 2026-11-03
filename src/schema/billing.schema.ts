@@ -100,6 +100,8 @@ export const BillingUsageLedger = pgTable("billing_usage_ledger", {
   user_uuid: uuid("user_uuid").notNull().references(() => Users.user_uuid, { onDelete: "cascade" }),
   project_uuid: uuid("project_uuid").references(() => Projects.project_uuid, { onDelete: "set null" }),
   api_key_uuid: uuid("api_key_uuid").references(() => ApiKeys.key_uuid, { onDelete: "set null" }),
+  /** Correlates this charge with API/GPU monitoring records for per-request diagnostics. */
+  request_id: uuid("request_id"),
   usage_type: billingUsageTypeEnum("usage_type").notNull(),
   quantity: numeric("quantity", { precision: 18, scale: 6 }).notNull(),
   unit_price_credits: numeric("unit_price_credits", { precision: 18, scale: 6 }).notNull(),
@@ -111,6 +113,7 @@ export const BillingUsageLedger = pgTable("billing_usage_ledger", {
 }, (table) => ({
   userCreatedIdx: index("billing_usage_user_created_idx").on(table.user_uuid, table.created_at),
   projectCreatedIdx: index("billing_usage_project_created_idx").on(table.project_uuid, table.created_at),
+  requestIdx: index("billing_usage_request_idx").on(table.request_id),
 }));
 
 export const BillingSubscriptions = pgTable("billing_subscriptions", {

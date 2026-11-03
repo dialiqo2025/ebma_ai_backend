@@ -7,6 +7,9 @@ import { connectDB } from "./config/database/connection.database";
 import router from "./services/route";
 import { ZodError } from "zod";
 import { BillingController } from "./services/billing/billing.controller";
+import { observabilityRequestContext } from "./services/observability/observability.context";
+import { apiTransactionMonitor } from "./services/observability/observability.middleware";
+import { startObservabilityCleanup } from "./jobs/observability-cleanup";
 
 const app = express();
 const server = http.createServer(app);
@@ -26,6 +29,8 @@ app.set("trust proxy", 1);
 app.patch("/api/v1/stt/transcriptions/:transcription_uuid", express.json({ limit: "5mb" }));
 app.use(express.json({ limit: "256kb" }));
 app.use(express.urlencoded({ extended: true, limit: "256kb" }));
+app.use(observabilityRequestContext);
+app.use(apiTransactionMonitor);
 
 const corsOrigins = [
   process.env.CORS_ORIGINS,
@@ -116,6 +121,7 @@ app.use((
 server.listen(port, async () => {
   try {
     await connectDB();
+    startObservabilityCleanup();
     console.log(`Server is running on ${port}`);
   } catch (error) {
     console.log("Getting error for server start :", process.env.PORT);

@@ -5,6 +5,7 @@ import { HttpStatusCodes as Code } from "../../utils/httpType.util";
 import { GenResObj } from "../../utils/responseFormat.util";
 import { prepareTextForTts } from "../llm/llm.provider";
 import { recordUsage } from "../billing/billing.provider";
+import { recordSttResultObservation } from "../observability/observability.provider";
 import {
   ARABIC_STT_LANGUAGE,
   INDIC_STT_LANGUAGES,
@@ -767,6 +768,18 @@ const applyProviderJobSnapshot = async (
     }
   }
 
+  if (["completed", "failed", "cancelled"].includes(status) && row.status !== status) {
+    void recordSttResultObservation({
+      transcriptionUuid: row.transcription_uuid,
+      providerReference: row.provider_job_id,
+      status: status as "completed" | "failed" | "cancelled",
+      transcript: updated?.transcript ?? row.transcript,
+      errorCode: updated?.error_code ?? null,
+      errorMessage: updated?.error_message ?? null,
+      result: updated?.result_json,
+    }).catch((error) => console.error("STT result monitoring failed:", error));
+  }
+
   return updated ?? row;
 };
 
@@ -937,6 +950,19 @@ export const finishArabicTranscription = async (
       providerReference: updated.provider_job_id,
       metadata: { transcriptionUuid, language: "ar" },
     });
+  }
+
+
+  if (updated) {
+    void recordSttResultObservation({
+      transcriptionUuid: updated.transcription_uuid,
+      providerReference: updated.provider_job_id,
+      status: payload.status,
+      transcript: updated.transcript,
+      errorCode: updated.error_code,
+      errorMessage: updated.error_message,
+      result: updated.result_json,
+    }).catch((error) => console.error("Arabic STT result monitoring failed:", error));
   }
 
   return GenResObj(

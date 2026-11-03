@@ -1,0 +1,1 @@
+ALTER TABLE "stt_sessions" ADD COLUMN "request_id" uuid;

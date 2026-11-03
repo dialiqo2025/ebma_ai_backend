@@ -1,4 +1,4 @@
-import { mkdir, readdir, unlink, writeFile } from "node:fs/promises";
+import { access, mkdir, readdir, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { and, desc, eq, gte, ilike, inArray, isNotNull, lte, lt, or, sql } from "drizzle-orm";
@@ -8,11 +8,13 @@ import {
   GpuServiceLogs,
   ObservabilitySettings,
   SttTranscriptions,
+  SttSessions,
   TtsGenerations,
   BillingUsageLedger,
   Users,
 } from "../../schema";
 import { currentRequestContext } from "./observability.context";
+import { audioMimeTypeByFormat, getTtsAudioPath } from "../tts/tts.helper";
 
 const MAX_TEXT = 2_000;
 const MAX_SERIALIZED = 16_000;
@@ -349,6 +351,20 @@ export const listGpuOperations = async (query: Record<string, unknown>) => {
     to ? lte(SttTranscriptions.created_at, to) : undefined,
     search ? or(ilike(SttTranscriptions.original_filename, `%${search}%`), ilike(Users.email, `%${search}%`), ilike(Users.fullName, `%${search}%`)) : undefined,
   );
+  const sessionStatus = requestedStatus === "success"
+    ? eq(SttSessions.status, "completed")
+    : requestedStatus === "failed"
+      ? eq(SttSessions.status, "failed")
+      : requestedStatus === "processing"
+        ? sql`${SttSessions.status} not in ('completed', 'failed')`
+        : undefined;
+  const sessionFilters = and(
+    sessionStatus,
+    userUuid ? eq(SttSessions.user_uuid, userUuid) : undefined,
+    from ? gte(SttSessions.created_at, from) : undefined,
+    to ? lte(SttSessions.created_at, to) : undefined,
+    search ? or(ilike(SttSessions.transcript, `%${search}%`), ilike(Users.email, `%${search}%`), ilike(Users.fullName, `%${search}%`)) : undefined,
+  );
   const ttsFilters = and(
     ttsStatus,
     userUuid ? eq(TtsGenerations.user_uuid, userUuid) : undefined,
@@ -357,11 +373,16 @@ export const listGpuOperations = async (query: Record<string, unknown>) => {
     search ? or(ilike(TtsGenerations.input_text, `%${search}%`), ilike(Users.email, `%${search}%`), ilike(Users.fullName, `%${search}%`)) : undefined,
   );
 
-  const [sttRows, ttsRows, sttCount, ttsCount] = await Promise.all([
+  const [sttRows, sessionRows, ttsRows, sttCount, sessionCount, ttsCount] = await Promise.all([
     includeStt
       ? db.select({ operation: SttTranscriptions, userEmail: Users.email, userName: Users.fullName }).from(SttTranscriptions)
           .leftJoin(Users, eq(SttTranscriptions.user_uuid, Users.user_uuid)).where(sttFilters)
           .orderBy(desc(SttTranscriptions.created_at)).limit(take)
+      : Promise.resolve([]),
+    includeStt
+      ? db.select({ operation: SttSessions, userEmail: Users.email, userName: Users.fullName }).from(SttSessions)
+          .leftJoin(Users, eq(SttSessions.user_uuid, Users.user_uuid)).where(sessionFilters)
+          .orderBy(desc(SttSessions.created_at)).limit(take)
       : Promise.resolve([]),
     includeTts
       ? db.select({ operation: TtsGenerations, userEmail: Users.email, userName: Users.fullName }).from(TtsGenerations)
@@ -369,6 +390,7 @@ export const listGpuOperations = async (query: Record<string, unknown>) => {
           .orderBy(desc(TtsGenerations.created_at)).limit(take)
       : Promise.resolve([]),
     includeStt ? db.select({ count: sql<number>`count(*)::int` }).from(SttTranscriptions).leftJoin(Users, eq(SttTranscriptions.user_uuid, Users.user_uuid)).where(sttFilters) : Promise.resolve([{ count: 0 }]),
+    includeStt ? db.select({ count: sql<number>`count(*)::int` }).from(SttSessions).leftJoin(Users, eq(SttSessions.user_uuid, Users.user_uuid)).where(sessionFilters) : Promise.resolve([{ count: 0 }]),
     includeTts ? db.select({ count: sql<number>`count(*)::int` }).from(TtsGenerations).leftJoin(Users, eq(TtsGenerations.user_uuid, Users.user_uuid)).where(ttsFilters) : Promise.resolve([{ count: 0 }]),
   ]);
 
@@ -394,6 +416,27 @@ export const listGpuOperations = async (query: Record<string, unknown>) => {
       startedAt: operation.created_at,
       completedAt: operation.completed_at,
     })),
+    ...sessionRows.map(({ operation, ...user }) => ({
+      operationUuid: operation.session_uuid,
+      service: "stt" as const,
+      operationType: "live session",
+      status: operationStatus(operation.status),
+      rawStatus: operation.status,
+      title: `Live ${operation.language.toUpperCase()} · ${operation.output_mode}`,
+      userUuid: operation.user_uuid,
+      ...user,
+      requestId: operation.request_id,
+      providerReference: null,
+      fileSizeBytes: null,
+      inputUnits: operation.phrase_count,
+      outputUnits: operation.transcript.length,
+      audioSeconds: operation.audio_duration_seconds,
+      errorCode: operation.error_code,
+      errorMessage: operation.error_message,
+      createdAt: operation.created_at,
+      startedAt: operation.started_at ?? operation.created_at,
+      completedAt: operation.completed_at,
+    })),
     ...ttsRows.map(({ operation, ...user }) => ({
       operationUuid: operation.generation_uuid,
       service: "tts" as const,
@@ -417,20 +460,22 @@ export const listGpuOperations = async (query: Record<string, unknown>) => {
     })),
   ].sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime()).slice(offset, offset + pageSize);
 
-  const sttIds = operations.filter((item) => item.service === "stt").map((item) => item.operationUuid);
+  const sttIds = operations.filter((item) => item.operationType === "transcription").map((item) => item.operationUuid);
+  const sessionIds = operations.filter((item) => item.operationType === "live session").map((item) => item.operationUuid);
   const ttsIds = operations.filter((item) => item.service === "tts").map((item) => item.operationUuid);
-  const usageRows = sttIds.length || ttsIds.length
+  const usageRows = sttIds.length || sessionIds.length || ttsIds.length
     ? await db.select().from(BillingUsageLedger).where(or(
         sttIds.length ? inArray(sql<string>`${BillingUsageLedger.metadata}->>'transcriptionUuid'`, sttIds) : undefined,
+        sessionIds.length ? inArray(sql<string>`${BillingUsageLedger.metadata}->>'sessionUuid'`, sessionIds) : undefined,
         ttsIds.length ? inArray(sql<string>`${BillingUsageLedger.metadata}->>'generationUuid'`, ttsIds) : undefined,
       ))
     : [];
-  const total = Number(sttCount[0]?.count ?? 0) + Number(ttsCount[0]?.count ?? 0);
+  const total = Number(sttCount[0]?.count ?? 0) + Number(sessionCount[0]?.count ?? 0) + Number(ttsCount[0]?.count ?? 0);
   return {
     items: operations.map((operation) => {
       const usage = usageRows.filter((row) => {
-        const metadata = row.metadata as { transcriptionUuid?: unknown; generationUuid?: unknown } | null;
-        return metadata?.transcriptionUuid === operation.operationUuid || metadata?.generationUuid === operation.operationUuid;
+        const metadata = row.metadata as { transcriptionUuid?: unknown; sessionUuid?: unknown; generationUuid?: unknown } | null;
+        return metadata?.transcriptionUuid === operation.operationUuid || metadata?.sessionUuid === operation.operationUuid || metadata?.generationUuid === operation.operationUuid;
       });
       return { ...operation, chargedCredits: usage.reduce((sum, row) => sum + Number(row.charged_credits), 0), usageEvents: usage.length };
     }),
@@ -438,19 +483,112 @@ export const listGpuOperations = async (query: Record<string, unknown>) => {
   };
 };
 
+export const getGpuOperationStatistics = async (query: Record<string, unknown>) => {
+  const requestedFrom = dateInput(query.from);
+  const retention = requestedFrom ? null : await getObservabilitySettings();
+  const from = requestedFrom ?? new Date(Date.now() - (retention?.retention_days ?? 7) * 86_400_000);
+  const to = dateInput(query.to);
+  const userUuid = userUuidInput(query.userUuid);
+  const sttFilter = and(
+    userUuid ? eq(SttTranscriptions.user_uuid, userUuid) : undefined,
+    gte(SttTranscriptions.created_at, from),
+    to ? lte(SttTranscriptions.created_at, to) : undefined,
+  );
+  const sessionFilter = and(
+    userUuid ? eq(SttSessions.user_uuid, userUuid) : undefined,
+    gte(SttSessions.created_at, from),
+    to ? lte(SttSessions.created_at, to) : undefined,
+  );
+  const ttsFilter = and(
+    userUuid ? eq(TtsGenerations.user_uuid, userUuid) : undefined,
+    gte(TtsGenerations.created_at, from),
+    to ? lte(TtsGenerations.created_at, to) : undefined,
+  );
+  const billingFilter = and(
+    userUuid ? eq(BillingUsageLedger.user_uuid, userUuid) : undefined,
+    gte(BillingUsageLedger.created_at, from),
+    to ? lte(BillingUsageLedger.created_at, to) : undefined,
+    inArray(BillingUsageLedger.usage_type, ["stt_seconds", "tts_characters"]),
+  );
+  const [[files], [sessions], [tts], [billing]] = await Promise.all([
+    db.select({
+      total: sql<number>`count(*)::int`,
+      success: sql<number>`count(*) filter (where ${SttTranscriptions.status} = 'completed')::int`,
+      failed: sql<number>`count(*) filter (where ${SttTranscriptions.status} in ('failed', 'cancelled'))::int`,
+      processing: sql<number>`count(*) filter (where ${SttTranscriptions.status} not in ('completed', 'failed', 'cancelled'))::int`,
+      audioSeconds: sql<number>`coalesce(sum(${SttTranscriptions.audio_seconds}), 0)`,
+    }).from(SttTranscriptions).where(sttFilter),
+    db.select({
+      total: sql<number>`count(*)::int`,
+      success: sql<number>`count(*) filter (where ${SttSessions.status} = 'completed')::int`,
+      failed: sql<number>`count(*) filter (where ${SttSessions.status} = 'failed')::int`,
+      processing: sql<number>`count(*) filter (where ${SttSessions.status} not in ('completed', 'failed'))::int`,
+      audioSeconds: sql<number>`coalesce(sum(${SttSessions.audio_duration_seconds}), 0)`,
+    }).from(SttSessions).where(sessionFilter),
+    db.select({
+      total: sql<number>`count(*)::int`,
+      success: sql<number>`count(*) filter (where ${TtsGenerations.status} = 'completed')::int`,
+      failed: sql<number>`count(*) filter (where ${TtsGenerations.status} = 'failed')::int`,
+      processing: sql<number>`count(*) filter (where ${TtsGenerations.status} not in ('completed', 'failed'))::int`,
+      defaultVoice: sql<number>`count(*) filter (where ${TtsGenerations.voice_mode} = 'default')::int`,
+      clonedVoice: sql<number>`count(*) filter (where ${TtsGenerations.voice_mode} = 'clone')::int`,
+      inputCharacters: sql<number>`coalesce(sum(length(${TtsGenerations.input_text})), 0)::int`,
+      outputBytes: sql<number>`coalesce(sum(${TtsGenerations.audio_size_bytes}), 0)`,
+    }).from(TtsGenerations).where(ttsFilter),
+    db.select({ credits: sql<number>`coalesce(sum(${BillingUsageLedger.charged_credits}), 0)` })
+      .from(BillingUsageLedger).where(billingFilter),
+  ]);
+  const fileTotal = Number(files?.total ?? 0);
+  const liveTotal = Number(sessions?.total ?? 0);
+  const ttsTotal = Number(tts?.total ?? 0);
+  const success = Number(files?.success ?? 0) + Number(sessions?.success ?? 0) + Number(tts?.success ?? 0);
+  const failed = Number(files?.failed ?? 0) + Number(sessions?.failed ?? 0) + Number(tts?.failed ?? 0);
+  const processing = Number(files?.processing ?? 0) + Number(sessions?.processing ?? 0) + Number(tts?.processing ?? 0);
+  const total = fileTotal + liveTotal + ttsTotal;
+  return {
+    from,
+    to: to ?? new Date(),
+    totalRequests: total,
+    successRequests: success,
+    failedRequests: failed,
+    processingRequests: processing,
+    successRate: total ? (success / total) * 100 : 0,
+    sttRequests: fileTotal + liveTotal,
+    sttLiveSessions: liveTotal,
+    sttFileTranscriptions: fileTotal,
+    sttAudioSeconds: Number(files?.audioSeconds ?? 0) + Number(sessions?.audioSeconds ?? 0),
+    ttsRequests: ttsTotal,
+    ttsDefaultVoice: Number(tts?.defaultVoice ?? 0),
+    ttsVoiceCloning: Number(tts?.clonedVoice ?? 0),
+    ttsInputCharacters: Number(tts?.inputCharacters ?? 0),
+    ttsOutputBytes: Number(tts?.outputBytes ?? 0),
+    totalCredits: Number(billing?.credits ?? 0),
+  };
+};
+
 export const getGpuOperationDetails = async (service: unknown, operationUuid: string) => {
   if (service !== "stt" && service !== "tts") return null;
-  const [domainRow] = service === "stt"
-    ? await db.select({ operation: SttTranscriptions, userEmail: Users.email, userName: Users.fullName })
+  let domainRow: { operation: any; userEmail: string | null; userName: string | null } | undefined;
+  let isLiveSession = false;
+  if (service === "stt") {
+    [domainRow] = await db.select({ operation: SttTranscriptions, userEmail: Users.email, userName: Users.fullName })
         .from(SttTranscriptions).leftJoin(Users, eq(SttTranscriptions.user_uuid, Users.user_uuid))
-        .where(eq(SttTranscriptions.transcription_uuid, operationUuid)).limit(1)
-    : await db.select({ operation: TtsGenerations, userEmail: Users.email, userName: Users.fullName })
+        .where(eq(SttTranscriptions.transcription_uuid, operationUuid)).limit(1);
+    if (!domainRow) {
+      isLiveSession = true;
+      [domainRow] = await db.select({ operation: SttSessions, userEmail: Users.email, userName: Users.fullName })
+        .from(SttSessions).leftJoin(Users, eq(SttSessions.user_uuid, Users.user_uuid))
+        .where(eq(SttSessions.session_uuid, operationUuid)).limit(1);
+    }
+  } else {
+    [domainRow] = await db.select({ operation: TtsGenerations, userEmail: Users.email, userName: Users.fullName })
         .from(TtsGenerations).leftJoin(Users, eq(TtsGenerations.user_uuid, Users.user_uuid))
         .where(eq(TtsGenerations.generation_uuid, operationUuid)).limit(1);
+  }
   if (!domainRow) return null;
 
   const operation: any = domainRow.operation;
-  const metadataId = service === "stt" ? "transcriptionUuid" : "generationUuid";
+  const metadataId = service === "tts" ? "generationUuid" : isLiveSession ? "sessionUuid" : "transcriptionUuid";
   const usageRows = await db.select().from(BillingUsageLedger)
     .where(sql`${BillingUsageLedger.metadata}->>${metadataId} = ${operationUuid}`)
     .orderBy(desc(BillingUsageLedger.created_at));
@@ -459,10 +597,10 @@ export const getGpuOperationDetails = async (service: unknown, operationUuid: st
     ...usageRows.map((row) => row.request_id),
   ].filter((value): value is string => Boolean(value)))];
   const providerReferences = [...new Set([
-    service === "stt" ? operation.provider_job_id : operation.provider_request_id,
+    service === "stt" && !isLiveSession ? operation.provider_job_id : service === "tts" ? operation.provider_request_id : null,
     ...usageRows.map((row) => row.provider_reference),
   ].filter((value): value is string => Boolean(value)))];
-  const gpuIdFilter = service === "stt"
+  const gpuIdFilter = service === "stt" && !isLiveSession
     ? sql`${GpuServiceLogs.request_metadata}->>'transcriptionUuid' = ${operationUuid}`
     : undefined;
   const timeCorrelationFallback = service === "tts" && !requestIds.length && !providerReferences.length
@@ -502,8 +640,10 @@ export const getGpuOperationDetails = async (service: unknown, operationUuid: st
       durationMs: 0,
       endpoint: null,
       description: `${service.toUpperCase()} operation was accepted and persisted`,
-      request: service === "stt"
+      request: service === "stt" && !isLiveSession
         ? { filename: operation.original_filename, contentType: operation.content_type, fileSizeBytes: operation.file_size_bytes, language: operation.language, diarize: operation.diarize, speakers: operation.speakers }
+        : isLiveSession
+          ? { language: operation.language, outputMode: operation.output_mode, sampleRate: operation.sample_rate, endSilenceMs: operation.end_silence_ms, partials: operation.partials }
         : { text: operation.input_text, characters: operation.input_text.length, language: operation.language, voiceMode: operation.voice_mode, outputFormat: operation.audio_format, speed: operation.speed, pitch: operation.pitch },
       response: { operationUuid, status: operation.status },
     },
@@ -565,8 +705,10 @@ export const getGpuOperationDetails = async (service: unknown, operationUuid: st
       endpoint: null,
       description: operation.status === "completed" ? "The final result was persisted and made available to the user" : operation.error_message || `Operation ended with status ${operation.status}`,
       request: null,
-      response: service === "stt"
+      response: service === "stt" && !isLiveSession
         ? { status: operation.status, audioSeconds: operation.audio_seconds, transcriptCharacters: operation.transcript.length }
+        : isLiveSession
+          ? { status: operation.status, audioSeconds: operation.audio_duration_seconds, phrases: operation.phrase_count, transcriptCharacters: operation.transcript.length }
         : { status: operation.status, audioSizeBytes: operation.audio_size_bytes, format: operation.audio_format },
       errorCode: operation.error_code,
       errorMessage: operation.error_message,
@@ -586,25 +728,28 @@ export const getGpuOperationDetails = async (service: unknown, operationUuid: st
     operation: {
       operationUuid,
       service,
-      operationType: service === "stt" ? "transcription" : "generation",
+      operationType: service === "tts" ? "generation" : isLiveSession ? "live session" : "transcription",
       status: operationStatus(operation.status),
       rawStatus: operation.status,
       userUuid: operation.user_uuid,
       userEmail: domainRow.userEmail,
       userName: domainRow.userName,
       requestId: operation.request_id,
-      providerReference: service === "stt" ? operation.provider_job_id : operation.provider_request_id,
+      providerReference: service === "stt" && !isLiveSession ? operation.provider_job_id : service === "tts" ? operation.provider_request_id : null,
       createdAt,
       startedAt: operation.started_at ?? createdAt,
       completedAt,
       totalDurationMs: completedAt ? completedAt.getTime() - (operation.started_at ?? createdAt).getTime() : Date.now() - createdAt.getTime(),
       errorCode: operation.error_code,
       errorMessage: operation.error_message,
-      metrics: service === "stt"
+      metrics: service === "stt" && !isLiveSession
         ? { originalFilename: operation.original_filename, contentType: operation.content_type, uploadedBytes: operation.file_size_bytes, audioSeconds: operation.audio_seconds, transcriptCharacters: operation.transcript.length, language: operation.language }
+        : isLiveSession
+          ? { livePhrases: operation.phrase_count, audioSeconds: operation.audio_duration_seconds, transcriptCharacters: operation.transcript.length, sampleRate: operation.sample_rate, outputMode: operation.output_mode, language: operation.language }
         : { inputCharacters: operation.input_text.length, outputAudioBytes: operation.audio_size_bytes, outputFormat: operation.audio_format, language: operation.language, voiceMode: operation.voice_mode },
-      input: service === "stt" ? { filename: operation.original_filename } : { text: operation.input_text },
-      output: service === "stt" ? { transcript: operation.transcript, result: operation.result_json } : { audioFileName: operation.audio_file_name, mimeType: operation.audio_mime_type },
+      input: service === "tts" ? { text: operation.input_text } : isLiveSession ? { mode: operation.output_mode, language: operation.language } : { filename: operation.original_filename },
+      output: service === "tts" ? { audioFileName: operation.audio_file_name, mimeType: operation.audio_mime_type } : { transcript: operation.transcript, ...(!isLiveSession ? { result: operation.result_json } : {}) },
+      resultAvailable: service === "stt" ? Boolean(operation.transcript) : Boolean(operation.audio_file_name && operation.status === "completed"),
     },
     billing: {
       items: billing,
@@ -613,6 +758,30 @@ export const getGpuOperationDetails = async (service: unknown, operationUuid: st
     stages,
     related: { apiCalls: apiLogs.length, gpuCalls: gpuLogs.length, billingEvents: usageRows.length },
   };
+};
+
+export const monitoredOperationResult = async (service: unknown, operationUuid: string) => {
+  if (service === "stt") {
+    const [transcription] = await db.select({ transcript: SttTranscriptions.transcript, originalName: SttTranscriptions.original_filename })
+      .from(SttTranscriptions).where(eq(SttTranscriptions.transcription_uuid, operationUuid)).limit(1);
+    let row: { transcript: string; originalName: string } | undefined = transcription;
+    if (!row) {
+      const [session] = await db.select({ transcript: SttSessions.transcript })
+        .from(SttSessions).where(eq(SttSessions.session_uuid, operationUuid)).limit(1);
+      if (session) row = { transcript: session.transcript, originalName: `live-session-${operationUuid}` };
+    }
+    if (!row?.transcript) return null;
+    const baseName = path.basename(row.originalName, path.extname(row.originalName)).replace(/[^a-zA-Z0-9._-]/g, "_") || "transcription";
+    return { kind: "text" as const, content: row.transcript, fileName: `${baseName}-transcript.txt`, contentType: "text/plain; charset=utf-8" };
+  }
+  if (service === "tts") {
+    const [row] = await db.select().from(TtsGenerations).where(eq(TtsGenerations.generation_uuid, operationUuid)).limit(1);
+    if (!row?.audio_file_name || row.status !== "completed") return null;
+    const filePath = getTtsAudioPath(row.audio_file_name);
+    try { await access(filePath); } catch { return null; }
+    return { kind: "file" as const, path: filePath, fileName: row.audio_file_name, contentType: row.audio_mime_type ?? audioMimeTypeByFormat[row.audio_format] };
+  }
+  return null;
 };
 
 export const listObservedUsers = async (query: Record<string, unknown>) => {

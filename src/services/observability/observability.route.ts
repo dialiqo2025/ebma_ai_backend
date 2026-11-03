@@ -6,11 +6,13 @@ import {
   cleanupExpiredObservabilityLogs,
   getObservabilitySettings,
   getGpuOperationDetails,
+  getGpuOperationStatistics,
   listApiTransactions,
   listGpuTransactions,
   listGpuOperations,
   listObservedUsers,
   monitoredArtifact,
+  monitoredOperationResult,
   monitoredTranscript,
   updateObservabilitySettings,
 } from "./observability.provider";
@@ -28,6 +30,9 @@ router.get("/gpu-transactions", superAdmin, async (req, res, next) => {
 router.get("/gpu-operations", superAdmin, async (req, res, next) => {
   try { send(res, await listGpuOperations(req.query), "GPU operations fetched successfully"); } catch (error) { next(error); }
 });
+router.get("/gpu-operation-statistics", superAdmin, async (req, res, next) => {
+  try { send(res, await getGpuOperationStatistics(req.query), "GPU operation statistics fetched successfully"); } catch (error) { next(error); }
+});
 router.get("/gpu-operations/:service/:operation_uuid", superAdmin, async (req, res, next) => {
   try {
     const operationUuid = String(req.params.operation_uuid || "");
@@ -41,6 +46,21 @@ router.get("/gpu-operations/:service/:operation_uuid", superAdmin, async (req, r
       return;
     }
     send(res, details, "GPU operation details fetched successfully");
+  } catch (error) { next(error); }
+});
+router.get("/gpu-operations/:service/:operation_uuid/result", superAdmin, async (req, res, next) => {
+  try {
+    const operationUuid = String(req.params.operation_uuid || "");
+    const result = await monitoredOperationResult(req.params.service, operationUuid);
+    if (!result) {
+      res.status(404).json(GenResObj(Code.NOT_FOUND, false, "Result file is not available for this operation").data);
+      return;
+    }
+    res.setHeader("Content-Type", result.contentType);
+    res.setHeader("Content-Disposition", `attachment; filename="${result.fileName.replace(/["\\]/g, "_")}"`);
+    res.setHeader("Cache-Control", "private, no-store");
+    if (result.kind === "text") res.send(result.content);
+    else res.sendFile(result.path, (error) => { if (error) next(error); });
   } catch (error) { next(error); }
 });
 router.get("/users", superAdmin, async (req, res, next) => {

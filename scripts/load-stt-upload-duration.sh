@@ -23,7 +23,7 @@
 set -euo pipefail
 
 BASE_URL="${BASE_URL:-https://api.ebma.ai}"
-TOKEN="${TOKEN:?Set TOKEN, e.g. TOKEN='Bearer eyJ...' }"
+TOKEN="${TOKEN:?Set TOKEN, e.g. TOKEN='Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6ImEwMmE5NDYwLWQyMDgtNDAxYi04ZTRhLTM1ZmM3MTc5M2Q0YiIsInJvbGUiOiJ1c2VyIiwiaWF0IjoxNzkzMjY5Njg3LCJleHAiOjE3OTU4NjE2ODd9.E3obLAJhY35BfPRtOkjO0BdxUNWlAFuMtvAGYzEfxFQ' }"
 FILE="${FILE:-docs/ebma-asr/docs/sample_hi.wav}"
 LANGUAGE="${LANGUAGE:-hi}"
 DIARIZE="${DIARIZE:-false}"

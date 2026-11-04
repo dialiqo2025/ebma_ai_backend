@@ -1,29 +1,36 @@
 #!/usr/bin/env bash
 # Duration-based STT upload load test with interval reports.
-# Leaves scripts/load-stt-upload.sh unchanged (fixed TOTAL runs).
 #
 # Usage:
 #   TOKEN="Bearer eyJ..." CONCURRENCY=4 DURATION_SEC=3600 ./scripts/load-stt-upload-duration.sh
+#   API_KEY="ebma_sk_..." ./scripts/load-stt-upload-duration-apikey.sh
 #
 # Env:
 #   BASE_URL           default https://api.ebma.ai
-#   TOKEN              required
-#   FILE               default docs/ebma-asr/docs/sample_hi.wav  (single file)
+#   TOKEN              required — "Bearer <jwt>" or "Bearer ebma_sk_…"
+#   FILE               default docs/ebma-asr/docs/sample_hi.wav
 #   LANGUAGE           default hi
 #   DIARIZE            default false
 #   CONCURRENCY        default 4
-#   DURATION_SEC       default 3600 (1 hour)
+#   DURATION_SEC       default 3600
 #   REPORT_EVERY_SEC   default 60
-#   POLL               default 1 (wait for completed/failed)
+#   POLL               default 1
 #   POLL_INTERVAL      default 2
 #   POLL_MAX           default 60
 #   TIMEOUT            default 120
 #   OUT_DIR            default ./scripts/.stt-load-results-duration/<timestamp>
+#
+# Result files (only these 5 remain in OUT_DIR):
+#   rows_all.tsv   — every finished request (no header)
+#   results.tsv    — same rows with header
+#   intervals.tsv  — per-minute report rows
+#   STOP           — created when duration ends
+#   summary.txt    — final summary
 
 set -euo pipefail
 
 BASE_URL="${BASE_URL:-https://api.ebma.ai}"
-TOKEN="${TOKEN:?Set TOKEN, e.g. TOKEN='Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6ImEwMmE5NDYwLWQyMDgtNDAxYi04ZTRhLTM1ZmM3MTc5M2Q0YiIsInJvbGUiOiJ1c2VyIiwiaWF0IjoxNzkzMjY5Njg3LCJleHAiOjE3OTU4NjE2ODd9.E3obLAJhY35BfPRtOkjO0BdxUNWlAFuMtvAGYzEfxFQ' }"
+TOKEN="${TOKEN:?Set TOKEN, e.g. TOKEN='Bearer eyJ...' or Bearer ebma_sk_... }"
 FILE="${FILE:-docs/ebma-asr/docs/sample_hi.wav}"
 LANGUAGE="${LANGUAGE:-hi}"
 DIARIZE="${DIARIZE:-false}"
@@ -56,15 +63,23 @@ fi
 HAS_JQ=0
 command -v jq >/dev/null 2>&1 && HAS_JQ=1
 
-mkdir -p "$OUT_DIR/rows" "$OUT_DIR/inflight" "$OUT_DIR/bodies" "$OUT_DIR/logs"
+mkdir -p "$OUT_DIR"
 SUMMARY="$OUT_DIR/summary.txt"
 RESULTS="$OUT_DIR/results.tsv"
 INTERVALS="$OUT_DIR/intervals.tsv"
-RUN_LOG="$OUT_DIR/run.log"
+ROWS_ALL="$OUT_DIR/rows_all.tsv"
 STOP_FLAG="$OUT_DIR/STOP"
 
+# Ephemeral work dir (bodies / inflight) — removed on exit so OUT_DIR stays clean.
+WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ebma-stt-load.XXXXXX")"
+cleanup_work() {
+  rm -rf "$WORK_DIR" 2>/dev/null || true
+}
+trap cleanup_work EXIT
+
+mkdir -p "$WORK_DIR/inflight" "$WORK_DIR/bodies"
+
 FILE_BYTES=$(wc -c < "$FILE" | tr -d ' ')
-FILE_BASE=$(basename "$FILE")
 
 now_epoch() {
   local d
@@ -108,7 +123,7 @@ http_indication() {
 log_line() {
   local ts
   ts=$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null || date)
-  echo "[$ts] $*" | tee -a "$RUN_LOG"
+  echo "[$ts] $*"
 }
 
 json_get() {
@@ -144,17 +159,23 @@ PY
   fi
 }
 
-# Write one completed request row (atomic via unique file).
+# Append one finished request to rows_all.tsv (flock when available).
 # cols: end_epoch worker seq http_code upload_sec poll_sec e2e_sec uuid status ok err_code
 write_row() {
   local end_epoch="$1" worker="$2" seq="$3" code="$4" upload_sec="$5"
-  # Bash: $10 is ${1}0 — must use ${10} / ${11} for args 10+.
   local poll_sec="$6" e2e_sec="$7" uuid="$8" status="$9" ok="${10}" err_code="${11:-}"
-  local row_file="$OUT_DIR/rows/w${worker}-$(printf '%06d' "$seq").tsv"
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+  local line
+  line=$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$end_epoch" "$worker" "$seq" "$code" "$upload_sec" "$poll_sec" \
-    "$e2e_sec" "${uuid:-}" "${status:-}" "$ok" "${err_code:-}" \
-    > "$row_file"
+    "$e2e_sec" "${uuid:-}" "${status:-}" "$ok" "${err_code:-}")
+  if command -v flock >/dev/null 2>&1; then
+    (
+      flock 200
+      printf '%s' "$line" >> "$ROWS_ALL"
+    ) 200>>"$WORK_DIR/rows_all.lock"
+  else
+    printf '%s' "$line" >> "$ROWS_ALL"
+  fi
 }
 
 worker_loop() {
@@ -165,24 +186,18 @@ worker_loop() {
   local body_file poll_body poll_code attempt pstart inflight_id
   local now_i end_i
 
-  echo "[w$worker] started pid=$$" >> "$OUT_DIR/logs/worker-${worker}.log"
-
   while [[ ! -f "$STOP_FLAG" ]]; do
-    # Stop starting new work after duration; in-flight may finish after.
-    # Compare integer epochs in bash (awk exit codes invert easily in `if`).
     now_i=$(now_epoch)
     now_i=${now_i%.*}
     end_i=${END_EPOCH%.*}
     if (( now_i >= end_i )); then
-      echo "[w$worker] stopping — duration reached (now=$now_i end=$end_i)" \
-        >> "$OUT_DIR/logs/worker-${worker}.log"
       break
     fi
 
     seq=$((seq + 1))
     inflight_id="w${worker}_${seq}"
-    : > "$OUT_DIR/inflight/$inflight_id"
-    body_file="$OUT_DIR/bodies/${inflight_id}.json"
+    : > "$WORK_DIR/inflight/$inflight_id"
+    body_file="$WORK_DIR/bodies/${inflight_id}.json"
     e2e_start=$(now_epoch)
 
     upload_start=$(now_epoch)
@@ -206,9 +221,6 @@ worker_loop() {
     poll_sec="0"
     ok="0"
 
-    echo "[w$worker #$seq] UPLOAD http=$code ($(http_indication "$code")) ${upload_sec}s msg=${api_msg:--}" \
-      >> "$OUT_DIR/logs/worker-${worker}.log"
-
     if [[ "$code" == "202" || "$code" == "200" ]] && [[ -n "$uuid" ]]; then
       ok="1"
       status="${status:-queued}"
@@ -221,17 +233,15 @@ worker_loop() {
           fi
           sleep "$POLL_INTERVAL"
           attempt=$((attempt + 1))
-          poll_code=$(curl -sS -o "$OUT_DIR/bodies/${inflight_id}.poll.json" -w "%{http_code}" \
+          poll_code=$(curl -sS -o "$WORK_DIR/bodies/${inflight_id}.poll.json" -w "%{http_code}" \
             --max-time 30 \
             -H "Authorization: ${TOKEN}" \
             "${BASE_URL}/api/v1/stt/transcriptions/${uuid}" \
             || echo "000")
-          poll_body=$(cat "$OUT_DIR/bodies/${inflight_id}.poll.json" 2>/dev/null || echo "")
+          poll_body=$(cat "$WORK_DIR/bodies/${inflight_id}.poll.json" 2>/dev/null || echo "")
           status=$(json_get "$poll_body" ".data.status")
           status="${status:-unknown}"
           err_code=$(json_get "$poll_body" ".data.error.code")
-          echo "[w$worker #$seq] POLL $attempt/$POLL_MAX http=$poll_code status=$status" \
-            >> "$OUT_DIR/logs/worker-${worker}.log"
         done
         poll_sec=$(elapsed_sec "$pstart")
         [[ "$status" == "completed" ]] || ok="0"
@@ -241,32 +251,18 @@ worker_loop() {
     e2e_sec=$(elapsed_sec "$e2e_start")
     write_row "$(now_epoch)" "$worker" "$seq" "$code" "$upload_sec" \
       "$poll_sec" "$e2e_sec" "${uuid:-}" "${status:-}" "$ok" "${err_code:-}"
-    rm -f "$OUT_DIR/inflight/$inflight_id"
-
-    if [[ "$ok" == "1" ]]; then
-      echo "[w$worker #$seq] DONE ok=1 status=$status e2e=${e2e_sec}s uuid=${uuid:--}" \
-        >> "$OUT_DIR/logs/worker-${worker}.log"
-    else
-      echo "[w$worker #$seq] FAIL ok=0 http=$code status=${status:--} err=${err_code:--} ${err_msg:--}" \
-        >> "$OUT_DIR/logs/worker-${worker}.log"
-    fi
+    rm -f "$WORK_DIR/inflight/$inflight_id" \
+      "$body_file" "$WORK_DIR/bodies/${inflight_id}.poll.json" 2>/dev/null || true
   done
-
-  echo "[w$worker] exited after seq=$seq" >> "$OUT_DIR/logs/worker-${worker}.log"
 }
 
-# Aggregate stats from rows finished at/before cutoff_epoch (empty = all).
-# Prints a multi-line report; also appends one TSV line to INTERVALS when label given.
 emit_report() {
   local elapsed_s="$1"
-  local label="$2"   # e.g. t=05:00 or FINAL
+  local label="$2"
   local cutoff="${3:-}"
   local milestone="${4:-0}"
   local inflight
-  inflight=$(find "$OUT_DIR/inflight" -type f 2>/dev/null | wc -l | tr -d ' ')
-
-  local tmp_all="$OUT_DIR/.rows_all.tsv"
-  cat "$OUT_DIR/rows"/*.tsv 2>/dev/null > "$tmp_all" || true
+  inflight=$(find "$WORK_DIR/inflight" -type f 2>/dev/null | wc -l | tr -d ' ')
 
   local report
   report=$(CUTOFF="$cutoff" WINDOW_SEC="$REPORT_EVERY_SEC" ELAPSED="$elapsed_s" INFLIGHT="$inflight" \
@@ -306,15 +302,10 @@ emit_report() {
       e2es[hits] = e2e; e2e_sum += e2e
       if (po > 0) { polls[++pn] = po; poll_sum += po }
       if (err != "") errc[err]++
-      if (window > 0 && elapsed > 0) {
-        # window = last REPORT_EVERY_SEC of elapsed wall time (approx by end_epoch)
-        # Use relative: keep rows with te >= (max_te - window) after scan — second pass needed.
-      }
       rows[hits] = $0
       te_list[hits] = te
     }
     END {
-      # Determine window using max end epoch among included rows
       max_te = 0
       for (i = 1; i <= hits; i++) if (te_list[i] > max_te) max_te = te_list[i]
       win_start = max_te - window
@@ -326,8 +317,6 @@ emit_report() {
           if (f[10] == "1") wo++; else wf++
         }
       }
-
-      # sort ups / e2es for percentiles (insertion sort — fine for load-test sizes)
       n = hits
       for (i = 2; i <= n; i++) {
         v = ups[i]; j = i - 1
@@ -344,12 +333,10 @@ emit_report() {
         while (j >= 1 && polls[j] > v) { polls[j+1] = polls[j]; j-- }
         polls[j+1] = v
       }
-
       sr = rate(oks, hits)
       fr = rate(fails, hits)
       rpm = elapsed > 0 ? (hits * 60.0)/elapsed : 0
       rps = elapsed > 0 ? hits / elapsed : 0
-
       printf "hits=%d ok=%d fail=%d success_rate=%.1f%% fail_rate=%.1f%% in_flight=%d rps=%.3f rpm=%.2f\n", \
         hits+0, oks+0, fails+0, sr, fr, inflight, rps, rpm
       printf "win(last_%ds): hits=%d ok=%d fail=%d\n", window, wh, wo, wf
@@ -362,16 +349,10 @@ emit_report() {
       printf "\njob:"
       for (s in job) printf " %s=%d", s, job[s]
       printf "\n"
-      # top errors
       ec = 0
-      for (e in errc) {
-        ec++
-        en[ec] = e
-        ev[ec] = errc[e]
-      }
+      for (e in errc) { ec++; en[ec] = e; ev[ec] = errc[e] }
       if (ec > 0) {
         printf "errors:"
-        # print up to 5 by count (simple)
         for (pass = 1; pass <= 5 && pass <= ec; pass++) {
           best = 0; bi = 0
           for (i = 1; i <= ec; i++) if (ev[i] > best) { best = ev[i]; bi = i }
@@ -381,28 +362,24 @@ emit_report() {
         }
         printf "\n"
       }
-
-      # machine-readable one-liner for intervals.tsv (printed to stderr marker via special prefix)
       printf "TSV\t%d\t%d\t%d\t%d\t%.2f\t%.2f\t%d\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\n", \
         elapsed, hits+0, oks+0, fails+0, sr, fr, inflight, \
         avg(up_sum,n), pct(ups,n,50), pct(ups,n,95), \
         avg(e2e_sum,n), pct(e2es,n,50), pct(e2es,n,95)
     }
-  ' "$tmp_all")
+  ' "$ROWS_ALL" 2>/dev/null || true)
 
   local pretty tsv_line
   pretty=$(echo "$report" | grep -v '^TSV' || true)
   tsv_line=$(echo "$report" | grep '^TSV' | sed 's/^TSV\t//' || true)
 
-  {
-    echo
-    if [[ "$milestone" == "1" ]]; then
-      echo "======== MILESTONE $label ========"
-    else
-      echo "-------- REPORT $label --------"
-    fi
-    echo "$pretty"
-  } | tee -a "$RUN_LOG"
+  echo
+  if [[ "$milestone" == "1" ]]; then
+    echo "======== MILESTONE $label ========"
+  else
+    echo "-------- REPORT $label --------"
+  fi
+  echo "$pretty"
 
   if [[ -n "$tsv_line" ]]; then
     echo -e "${label}\t${tsv_line}" >> "$INTERVALS"
@@ -416,7 +393,7 @@ is_milestone() {
   esac
 }
 
-: > "$RUN_LOG"
+: > "$ROWS_ALL"
 echo -e "label\telapsed_s\thits\tok\tfail\tsuccess_rate\tfail_rate\tin_flight\tupload_avg\tupload_p50\tupload_p95\te2e_avg\te2e_p50\te2e_p95" \
   > "$INTERVALS"
 
@@ -426,7 +403,7 @@ END_EPOCH=$(awk -v s="$START_EPOCH" -v d="$DURATION_SEC" 'BEGIN { printf "%.3f",
 
 export -f worker_loop write_row json_get http_indication elapsed_sec now_epoch
 export BASE_URL TOKEN FILE LANGUAGE DIARIZE POLL POLL_INTERVAL POLL_MAX TIMEOUT
-export OUT_DIR HAS_JQ STOP_FLAG END_EPOCH
+export OUT_DIR WORK_DIR HAS_JQ STOP_FLAG END_EPOCH ROWS_ALL
 
 HOST=$(hostname 2>/dev/null || echo unknown)
 
@@ -438,16 +415,15 @@ log_line "  CONCURRENCY=$CONCURRENCY DURATION_SEC=$DURATION_SEC REPORT_EVERY_SEC
 log_line "  host=$HOST"
 log_line "  OUT_DIR=$OUT_DIR"
 log_line "  ends_at_epoch=$END_EPOCH"
+log_line "  artifacts: rows_all.tsv intervals.tsv results.tsv STOP summary.txt"
 log_line "-----"
 
-# Start workers
 WORKER_PIDS=()
 for w in $(seq 1 "$CONCURRENCY"); do
   worker_loop "$w" &
   WORKER_PIDS+=("$!")
 done
 
-# Reporter loop
 next_report=$REPORT_EVERY_SEC
 while true; do
   now=$(now_epoch)
@@ -457,7 +433,6 @@ while true; do
     break
   fi
 
-  # Sleep until next report or end
   sleep_for=$(( next_report - elapsed ))
   [[ "$sleep_for" -lt 1 ]] && sleep_for=1
   remaining=$(( DURATION_SEC - elapsed ))
@@ -468,7 +443,6 @@ while true; do
   elapsed=$(awk -v s="$START_EPOCH" -v n="$now" 'BEGIN { printf "%d", n - s }')
   [[ "$elapsed" -gt "$DURATION_SEC" ]] && elapsed=$DURATION_SEC
 
-  # Emit reports for each crossed tick
   while [[ "$next_report" -le "$elapsed" && "$next_report" -le "$DURATION_SEC" ]]; do
     label="t=$(fmt_mmss "$next_report")"
     ms=0
@@ -483,14 +457,13 @@ while true; do
   fi
 done
 
-# Stop new work; wait for in-flight to finish (with grace)
 log_line "Duration reached — stopping new uploads (waiting for in-flight)..."
 touch "$STOP_FLAG"
 
 GRACE_SEC=$(( POLL_MAX * POLL_INTERVAL + TIMEOUT + 60 ))
 grace_deadline=$(( $(date +%s) + GRACE_SEC ))
 while true; do
-  inflight=$(find "$OUT_DIR/inflight" -type f 2>/dev/null | wc -l | tr -d ' ')
+  inflight=$(find "$WORK_DIR/inflight" -type f 2>/dev/null | wc -l | tr -d ' ')
   alive=0
   for p in "${WORKER_PIDS[@]}"; do
     kill -0 "$p" 2>/dev/null && alive=1 && break
@@ -507,17 +480,13 @@ while true; do
 done
 wait 2>/dev/null || true
 
-# Final report
-FINAL_ELAPSED=$DURATION_SEC
-emit_report "$FINAL_ELAPSED" "FINAL" "" 1
+emit_report "$DURATION_SEC" "FINAL" "" 1
 
-# Merge results
 {
   echo -e "end_epoch\tworker\tseq\thttp_code\tupload_sec\tpoll_sec\te2e_sec\tuuid\tstatus\tok\terr_code"
-  cat "$OUT_DIR/rows"/*.tsv 2>/dev/null || true
+  cat "$ROWS_ALL" 2>/dev/null || true
 } > "$RESULTS"
 
-# Summary
 {
   echo "======== STT DURATION LOAD TEST SUMMARY ========"
   echo "started=$(date -d "@$START_EPOCH_INT" -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -r "$START_EPOCH_INT" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo "$START_EPOCH_INT")"
@@ -545,12 +514,19 @@ emit_report "$FINAL_ELAPSED" "FINAL" "" 1
   echo "  601           = Invalid/expired token"
   echo "  503           = ASR unavailable"
   echo
-  echo "results=$RESULTS"
-  echo "intervals=$INTERVALS"
-  echo "run_log=$RUN_LOG"
+  echo "---- Artifacts (OUT_DIR) ----"
+  echo "  rows_all.tsv"
+  echo "  results.tsv"
+  echo "  intervals.tsv"
+  echo "  STOP"
+  echo "  summary.txt"
   echo "==============================================="
-} | tee "$SUMMARY" | tee -a "$RUN_LOG"
+} | tee "$SUMMARY"
 
-log_line "Done. Summary: $SUMMARY"
-echo "Intervals: $INTERVALS"
-echo "Results:   $RESULTS"
+# Ensure only the 5 allowed artifacts remain in OUT_DIR
+rm -f "$OUT_DIR/ROWS_ALL.lock" "$OUT_DIR/rows_all.tsv.lock" 2>/dev/null || true
+find "$OUT_DIR" -mindepth 1 -maxdepth 1 ! -name 'rows_all.tsv' ! -name 'results.tsv' \
+  ! -name 'intervals.tsv' ! -name 'STOP' ! -name 'summary.txt' -exec rm -rf {} + 2>/dev/null || true
+
+log_line "Done. OUT_DIR=$OUT_DIR"
+ls -la "$OUT_DIR"

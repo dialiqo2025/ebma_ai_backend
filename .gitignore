@@ -151,7 +151,7 @@ storage/
 # STT / TTS load-test outputs
 scripts/.stt-load-results/
 scripts/.stt-load-results-duration/
-scripts/.stt-load-results-duration2/
+# scripts/.stt-load-results-duration2/
 scripts/.stt-load-results-duration-apikey/
 scripts/.tts-load-results/
 

@@ -72,7 +72,10 @@ STOP_FLAG="$OUT_DIR/STOP"
 
 # Ephemeral work dir (bodies / inflight) — removed on exit so OUT_DIR stays clean.
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ebma-stt-load.XXXXXX")"
+MAIN_PID=$BASHPID
 cleanup_work() {
+  # Background workers inherit EXIT traps; only the parent may delete WORK_DIR.
+  [[ "${BASHPID:-$$}" -eq "$MAIN_PID" ]] || return 0
   rm -rf "$WORK_DIR" 2>/dev/null || true
 }
 trap cleanup_work EXIT
@@ -163,8 +166,10 @@ PY
 # cols: end_epoch worker seq http_code upload_sec poll_sec e2e_sec uuid status ok err_code
 write_row() {
   local end_epoch="$1" worker="$2" seq="$3" code="$4" upload_sec="$5"
-  local poll_sec="$6" e2e_sec="$7" uuid="$8" status="$9" ok="${10}" err_code="${11:-}"
-  local line
+  local poll_sec="$6" e2e_sec="$7" uuid="$8" status="$9"
+  # Avoid $10 / $11 — bash treats $10 as ${1}0 in some contexts; shift instead.
+  shift 9
+  local ok="${1:-0}" err_code="${2:-}" line
   line=$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$end_epoch" "$worker" "$seq" "$code" "$upload_sec" "$poll_sec" \
     "$e2e_sec" "${uuid:-}" "${status:-}" "$ok" "${err_code:-}")
@@ -172,13 +177,18 @@ write_row() {
     (
       flock 200
       printf '%s' "$line" >> "$ROWS_ALL"
-    ) 200>>"$WORK_DIR/rows_all.lock"
+    ) 200>>"$WORK_DIR/rows_all.lock" || printf '%s' "$line" >> "$ROWS_ALL"
   else
     printf '%s' "$line" >> "$ROWS_ALL"
   fi
+  return 0
 }
 
 worker_loop() {
+  # Do not run the parent's EXIT cleanup (would delete shared WORK_DIR).
+  trap - EXIT
+  set +e
+
   local worker="$1"
   local seq=0
   local e2e_start upload_start code body uuid status ok
@@ -301,7 +311,8 @@ emit_report() {
       ups[hits] = up; up_sum += up
       e2es[hits] = e2e; e2e_sum += e2e
       if (po > 0) { polls[++pn] = po; poll_sum += po }
-      if (err != "") errc[err]++
+      # Only count real error codes (skip empty / numeric epochs from bad rows)
+      if (err != "" && err !~ /^[0-9]+(\.[0-9]+)?$/) errc[err]++
       rows[hits] = $0
       te_list[hits] = te
     }

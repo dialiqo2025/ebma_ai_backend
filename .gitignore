@@ -151,4 +151,11 @@ storage/
 # STT / TTS load-test outputs
 scripts/.stt-load-results/
 scripts/.stt-load-results-duration/
+scripts/.stt-load-results-duration2/
+scripts/.stt-load-results-duration-apikey/
 scripts/.tts-load-results/
+
+# Local secrets for systemd load tests (use .example in repo)
+/etc/ebma/stt-load.env
+scripts/systemd/stt-load.env
+

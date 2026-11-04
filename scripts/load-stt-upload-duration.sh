@@ -162,26 +162,23 @@ PY
   fi
 }
 
-# Append one finished request to rows_all.tsv (flock when available).
+# Per-worker files avoid lock contention on rows_all.tsv.
 # cols: end_epoch worker seq http_code upload_sec poll_sec e2e_sec uuid status ok err_code
 write_row() {
   local end_epoch="$1" worker="$2" seq="$3" code="$4" upload_sec="$5"
   local poll_sec="$6" e2e_sec="$7" uuid="$8" status="$9"
-  # Avoid $10 / $11 — bash treats $10 as ${1}0 in some contexts; shift instead.
   shift 9
-  local ok="${1:-0}" err_code="${2:-}" line
-  line=$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+  local ok="${1:-0}" err_code="${2:-}"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$end_epoch" "$worker" "$seq" "$code" "$upload_sec" "$poll_sec" \
-    "$e2e_sec" "${uuid:-}" "${status:-}" "$ok" "${err_code:-}")
-  if command -v flock >/dev/null 2>&1; then
-    (
-      flock 200
-      printf '%s' "$line" >> "$ROWS_ALL"
-    ) 200>>"$WORK_DIR/rows_all.lock" || printf '%s' "$line" >> "$ROWS_ALL"
-  else
-    printf '%s' "$line" >> "$ROWS_ALL"
-  fi
+    "$e2e_sec" "${uuid:-}" "${status:-}" "$ok" "${err_code:-}" \
+    >> "$WORK_DIR/worker-${worker}.tsv"
   return 0
+}
+
+# Merge per-worker TSVs into rows_all.tsv (called by reporter / finalization).
+sync_rows_all() {
+  cat "$WORK_DIR"/worker-*.tsv 2>/dev/null > "$ROWS_ALL" || : > "$ROWS_ALL"
 }
 
 worker_loop() {
@@ -194,24 +191,30 @@ worker_loop() {
   local e2e_start upload_start code body uuid status ok
   local upload_sec poll_sec e2e_sec api_msg err_code err_msg
   local body_file poll_body poll_code attempt pstart inflight_id
-  local now_i end_i
+  local now_i end_i worker_log
+
+  worker_log="$WORK_DIR/worker-${worker}.log"
+  : > "$WORK_DIR/worker-${worker}.tsv"
+  echo "worker=$worker pid=$BASHPID started" >> "$worker_log"
 
   while [[ ! -f "$STOP_FLAG" ]]; do
     now_i=$(now_epoch)
     now_i=${now_i%.*}
     end_i=${END_EPOCH%.*}
     if (( now_i >= end_i )); then
+      echo "duration reached, stopping" >> "$worker_log"
       break
     fi
 
     seq=$((seq + 1))
     inflight_id="w${worker}_${seq}"
+    mkdir -p "$WORK_DIR/inflight" "$WORK_DIR/bodies"
     : > "$WORK_DIR/inflight/$inflight_id"
     body_file="$WORK_DIR/bodies/${inflight_id}.json"
     e2e_start=$(now_epoch)
 
     upload_start=$(now_epoch)
-    code=$(curl -sS -o "$body_file" -w "%{http_code}" \
+    code=$(curl -s -o "$body_file" -w "%{http_code}" \
       --max-time "$TIMEOUT" \
       -X POST "${BASE_URL}/api/v1/stt/transcriptions" \
       -H "Authorization: ${TOKEN}" \
@@ -231,6 +234,8 @@ worker_loop() {
     poll_sec="0"
     ok="0"
 
+    echo "seq=$seq upload_http=$code uuid=${uuid:-} msg=${api_msg:-}" >> "$worker_log"
+
     if [[ "$code" == "202" || "$code" == "200" ]] && [[ -n "$uuid" ]]; then
       ok="1"
       status="${status:-queued}"
@@ -243,7 +248,7 @@ worker_loop() {
           fi
           sleep "$POLL_INTERVAL"
           attempt=$((attempt + 1))
-          poll_code=$(curl -sS -o "$WORK_DIR/bodies/${inflight_id}.poll.json" -w "%{http_code}" \
+          poll_code=$(curl -s -o "$WORK_DIR/bodies/${inflight_id}.poll.json" -w "%{http_code}" \
             --max-time 30 \
             -H "Authorization: ${TOKEN}" \
             "${BASE_URL}/api/v1/stt/transcriptions/${uuid}" \
@@ -252,6 +257,7 @@ worker_loop() {
           status=$(json_get "$poll_body" ".data.status")
           status="${status:-unknown}"
           err_code=$(json_get "$poll_body" ".data.error.code")
+          echo "seq=$seq poll=$attempt/$POLL_MAX http=$poll_code status=$status" >> "$worker_log"
         done
         poll_sec=$(elapsed_sec "$pstart")
         [[ "$status" == "completed" ]] || ok="0"
@@ -261,9 +267,11 @@ worker_loop() {
     e2e_sec=$(elapsed_sec "$e2e_start")
     write_row "$(now_epoch)" "$worker" "$seq" "$code" "$upload_sec" \
       "$poll_sec" "$e2e_sec" "${uuid:-}" "${status:-}" "$ok" "${err_code:-}"
+    echo "seq=$seq done ok=$ok status=$status e2e=$e2e_sec" >> "$worker_log"
     rm -f "$WORK_DIR/inflight/$inflight_id" \
       "$body_file" "$WORK_DIR/bodies/${inflight_id}.poll.json" 2>/dev/null || true
   done
+  echo "worker=$worker exited seq=$seq" >> "$worker_log"
 }
 
 emit_report() {
@@ -272,6 +280,7 @@ emit_report() {
   local cutoff="${3:-}"
   local milestone="${4:-0}"
   local inflight
+  sync_rows_all
   inflight=$(find "$WORK_DIR/inflight" -type f 2>/dev/null | wc -l | tr -d ' ')
 
   local report
@@ -412,7 +421,7 @@ START_EPOCH=$(now_epoch)
 START_EPOCH_INT=${START_EPOCH%.*}
 END_EPOCH=$(awk -v s="$START_EPOCH" -v d="$DURATION_SEC" 'BEGIN { printf "%.3f", s + d }')
 
-export -f worker_loop write_row json_get http_indication elapsed_sec now_epoch
+export -f worker_loop write_row sync_rows_all json_get http_indication elapsed_sec now_epoch
 export BASE_URL TOKEN FILE LANGUAGE DIARIZE POLL POLL_INTERVAL POLL_MAX TIMEOUT
 export OUT_DIR WORK_DIR HAS_JQ STOP_FLAG END_EPOCH ROWS_ALL
 
@@ -425,15 +434,32 @@ log_line "  LANGUAGE=$LANGUAGE DIARIZE=$DIARIZE POLL=$POLL"
 log_line "  CONCURRENCY=$CONCURRENCY DURATION_SEC=$DURATION_SEC REPORT_EVERY_SEC=$REPORT_EVERY_SEC"
 log_line "  host=$HOST"
 log_line "  OUT_DIR=$OUT_DIR"
+log_line "  WORK_DIR=$WORK_DIR"
 log_line "  ends_at_epoch=$END_EPOCH"
 log_line "  artifacts: rows_all.tsv intervals.tsv results.tsv STOP summary.txt"
 log_line "-----"
 
 WORKER_PIDS=()
 for w in $(seq 1 "$CONCURRENCY"); do
+  : > "$WORK_DIR/worker-${w}.tsv"
   worker_loop "$w" &
-  WORKER_PIDS+=("$!")
+  _pid=$!
+  WORKER_PIDS+=("$_pid")
+  log_line "  started worker $w pid=$_pid"
 done
+sleep 2
+alive=0
+for p in "${WORKER_PIDS[@]}"; do
+  kill -0 "$p" 2>/dev/null && alive=$((alive + 1))
+done
+log_line "  workers still alive after 2s: $alive / $CONCURRENCY"
+if [[ "$alive" -eq 0 ]]; then
+  log_line "ERROR: all workers exited immediately — check $WORK_DIR/worker-*.log"
+  for f in "$WORK_DIR"/worker-*.log; do
+    [[ -f "$f" ]] && { echo "---- $f ----"; cat "$f"; }
+  done
+  exit 1
+fi
 
 next_report=$REPORT_EVERY_SEC
 while true; do
@@ -491,7 +517,17 @@ while true; do
 done
 wait 2>/dev/null || true
 
+sync_rows_all
 emit_report "$DURATION_SEC" "FINAL" "" 1
+
+# If still almost no rows, dump worker logs to help diagnose.
+row_count=$(wc -l < "$ROWS_ALL" 2>/dev/null | tr -d ' ')
+if [[ "${row_count:-0}" -lt "$CONCURRENCY" ]]; then
+  log_line "WARN: only $row_count rows — worker logs:"
+  for f in "$WORK_DIR"/worker-*.log; do
+    [[ -f "$f" ]] && { echo "---- $f ----"; cat "$f"; }
+  done
+fi
 
 {
   echo -e "end_epoch\tworker\tseq\thttp_code\tupload_sec\tpoll_sec\te2e_sec\tuuid\tstatus\tok\terr_code"

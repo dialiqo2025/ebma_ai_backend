@@ -10,6 +10,7 @@ import { BillingController } from "./services/billing/billing.controller";
 import { observabilityRequestContext } from "./services/observability/observability.context";
 import { apiTransactionMonitor } from "./services/observability/observability.middleware";
 import { startObservabilityCleanup } from "./jobs/observability-cleanup";
+import { startGpuHealthMonitor } from "./jobs/gpu-health-monitor";
 
 const app = express();
 const server = http.createServer(app);
@@ -122,6 +123,7 @@ server.listen(port, async () => {
   try {
     await connectDB();
     startObservabilityCleanup();
+    startGpuHealthMonitor();
     console.log(`Server is running on ${port}`);
   } catch (error) {
     console.log("Getting error for server start :", process.env.PORT);

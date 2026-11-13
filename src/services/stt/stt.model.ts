@@ -1,5 +1,14 @@
 import { z } from "zod";
 import { linkCurrentSttUpload, observeGpuCall } from "../observability/observability.provider";
+import { ARABIC_UPLOAD_JOB_PREFIX, isArabicSttLanguage, isArabicUploadJobId } from "./stt.helper";
+
+/** Upload jobs live under /v1/transcriptions (Indic) or /ar/v1/transcriptions (Arabic, job IDs prefixed "ar:"). */
+const isTranscriptionPath = (path: string) => /^(\/ar)?\/v1\/transcriptions/.test(path);
+
+const transcriptionPath = (jobId: string) =>
+  isArabicUploadJobId(jobId)
+    ? `/ar/v1/transcriptions/${encodeURIComponent(jobId.slice(ARABIC_UPLOAD_JOB_PREFIX.length))}`
+    : `/v1/transcriptions/${encodeURIComponent(jobId)}`;
 
 const tokenResponseValidator = z.object({
   token: z.string().min(1),
@@ -145,10 +154,10 @@ const modelFetch = async (
     || "unconfigured://ebma-asr";
 
   const method = String(init.method || "GET").toUpperCase();
-  const operation = path.startsWith("/v1/transcriptions")
+  const operation = isTranscriptionPath(path)
     ? method === "POST" ? "create_transcription" : method === "DELETE" ? "delete_transcription" : "get_transcription"
     : path.startsWith("/v1/tokens") ? "create_browser_token" : "health_check";
-  const uploadBody = method === "POST" && path.startsWith("/v1/transcriptions") && init.body instanceof Uint8Array
+  const uploadBody = method === "POST" && isTranscriptionPath(path) && init.body instanceof Uint8Array
     ? Buffer.from(init.body)
     : undefined;
   const originalName = new URL(path, "https://monitor.invalid").searchParams.get("filename") || "recording.bin";
@@ -353,15 +362,16 @@ export type CreateTranscriptionJobInput = {
 };
 
 export const createTranscriptionJob = async (input: CreateTranscriptionJobInput) => {
-  const query = new URLSearchParams({
-    lang: input.language,
-    filename: input.filename,
-  });
+  // Arabic goes to EBMA ASR Arabic (/ar), which has one language and no lang parameter.
+  const arabic = isArabicSttLanguage(input.language);
+  const query = new URLSearchParams(
+    arabic ? { filename: input.filename } : { lang: input.language, filename: input.filename },
+  );
   if (input.diarize) query.set("diarize", "1");
   if (input.speakers !== undefined) query.set("speakers", String(input.speakers));
 
   const response = await modelFetch(
-    `/v1/transcriptions?${query.toString()}`,
+    `${arabic ? "/ar" : ""}/v1/transcriptions?${query.toString()}`,
     {
       method: "POST",
       headers: {
@@ -379,7 +389,8 @@ export const createTranscriptionJob = async (input: CreateTranscriptionJobInput)
   }
 
   try {
-    const created = jobCreatedValidator.parse(await response.json());
+    const parsed = jobCreatedValidator.parse(await response.json());
+    const created = arabic ? { ...parsed, job_id: `${ARABIC_UPLOAD_JOB_PREFIX}${parsed.job_id}` } : parsed;
     linkCurrentSttUpload(created.job_id);
     return created;
   } catch {
@@ -535,10 +546,7 @@ export const tryParakeetTranscription = async (
 };
 
 export const getTranscriptionJob = async (jobId: string) => {
-  const response = await modelFetch(
-    `/v1/transcriptions/${encodeURIComponent(jobId)}`,
-    { method: "GET" },
-  );
+  const response = await modelFetch(transcriptionPath(jobId), { method: "GET" });
   if (!response.ok) throw await modelErrorFromResponse(response);
 
   try {
@@ -557,7 +565,7 @@ export const downloadTranscriptionJob = async (
   format: "txt" | "srt" | "vtt",
 ) => {
   const response = await modelFetch(
-    `/v1/transcriptions/${encodeURIComponent(jobId)}?format=${format}`,
+    `${transcriptionPath(jobId)}?format=${format}`,
     { method: "GET" },
   );
   if (!response.ok) throw await modelErrorFromResponse(response);
@@ -569,10 +577,7 @@ export const downloadTranscriptionJob = async (
 };
 
 export const deleteTranscriptionJob = async (jobId: string) => {
-  const response = await modelFetch(
-    `/v1/transcriptions/${encodeURIComponent(jobId)}`,
-    { method: "DELETE" },
-  );
+  const response = await modelFetch(transcriptionPath(jobId), { method: "DELETE" });
   // 204 success, or 404 if already gone — treat both as ok for cleanup.
   if (response.status === 204 || response.status === 404) return;
   if (!response.ok) throw await modelErrorFromResponse(response);

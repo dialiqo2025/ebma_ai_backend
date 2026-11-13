@@ -10,6 +10,7 @@ import { recordSttResultObservation } from "../observability/observability.provi
 import { currentRequestContext } from "../observability/observability.context";
 import {
   ARABIC_STT_LANGUAGE,
+  arabicUploadsEnabled,
   hasLocalSttResult,
   INDIC_STT_LANGUAGES,
   isArabicSttLanguage,
@@ -658,7 +659,9 @@ export const getSttOptions = async () => {
       available: arabic.available,
       reason: arabic.reason,
       protocol: "delta_segment",
-      fileViaWebsocketOnly: true,
+      fileViaWebsocketOnly: !arabicUploadsEnabled(),
+      fileUpload: arabicUploadsEnabled(),
+      speakerIdentification: arabicUploadsEnabled(),
     },
     audio: {
       encoding: "pcm_s16le",
@@ -996,13 +999,24 @@ export const createSttTranscription = async (
     return GenResObj(Code.REQUEST_TOO_LONG, false, "Uploaded file exceeds the size limit");
   }
 
-  // EBMA ASR has no Arabic upload endpoint — the browser streams the file itself.
+  // Arabic uploads go to EBMA ASR Arabic's job API (/ar/v1/transcriptions, speaker identification included).
+  // EBMA_ASR_ARABIC_UPLOADS=0 restores the old rule: the browser streams Arabic files itself.
   if (isArabicSttLanguage(payload.language)) {
-    return GenResObj(
-      Code.BAD_REQUEST,
-      false,
-      "Arabic files cannot be uploaded: send a JSON request without a file and stream the audio over the returned connection",
-    );
+    if (!arabicUploadsEnabled()) {
+      return GenResObj(
+        Code.BAD_REQUEST,
+        false,
+        "Arabic files cannot be uploaded: send a JSON request without a file and stream the audio over the returned connection",
+      );
+    }
+    const arabic = await checkArabicAvailability();
+    if (!arabic.available) {
+      return GenResObj(
+        Code.SERVICE_UNAVAILABLE,
+        false,
+        arabic.reason || "Arabic transcription is currently unavailable",
+      );
+    }
   }
 
   const [operation] = await db

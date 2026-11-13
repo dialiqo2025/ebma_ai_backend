@@ -47,6 +47,18 @@ export const isArabicWsJobId = (jobId: string) => jobId.startsWith("arabic-ws:")
 
 export const newArabicWsJobId = () => `arabic-ws:${randomUUID()}`;
 
+// Arabic file uploads go to EBMA ASR Arabic's job API (/ar/v1/transcriptions, with optional speaker identification).
+// Their upstream job IDs carry this prefix so that polling, download and delete reach /ar as well.
+// EBMA_ASR_ARABIC_UPLOADS=0 switches uploads off again (Arabic files then stream over /ar/ws from the browser only).
+export const ARABIC_UPLOAD_JOB_PREFIX = "ar:";
+
+export const isArabicUploadJobId = (jobId: string) => jobId.startsWith(ARABIC_UPLOAD_JOB_PREFIX);
+
+export const arabicUploadsEnabled = () =>
+  !["0", "false", "no", "off"].includes(
+    (process.env.EBMA_ASR_ARABIC_UPLOADS ?? "").trim().toLowerCase(),
+  );
+
 // Parakeet answers in the upload request, so these rows have no upstream job either.
 export const newParakeetJobId = () => `parakeet:${randomUUID()}`;
 

@@ -90,7 +90,8 @@ const extractLlmText = (payload: any): string | undefined => {
     payload?.result ??
     payload?.data?.text ??
     payload?.data?.output_text ??
-    payload?.candidates?.[0]?.content?.parts?.map((part: any) => part?.text).filter(Boolean).join(" ") ??
+    // Skip reasoning parts ({ thought: true }) that thinking models (Gemma 4, Gemini) return.
+    payload?.candidates?.[0]?.content?.parts?.filter((part: any) => !part?.thought).map((part: any) => part?.text).filter(Boolean).join(" ") ??
     payload?.candidates?.[0]?.content?.parts?.[0]?.text;
 
   if (typeof candidate === "string") return candidate;
@@ -126,7 +127,27 @@ export type LlmCompletionOutput = {
   providerRequestId?: string;
 };
 
-const buildGeminiBody = (input: LlmCompletionInput, settings?: UserLlmSettings) => {
+/** Gemma on Google AI Studio rejects systemInstruction, JSON mode and thinking config. */
+export const isGemmaModel = (modelName: string) => modelName.trim().toLowerCase().startsWith("gemma-");
+
+const buildGemmaBody = (input: LlmCompletionInput, settings?: UserLlmSettings) => {
+  const turns: LlmTurn[] = input.turns.length ? input.turns : [{ role: "user", text: "" }];
+  return {
+    contents: turns.map((turn, index) => ({
+      role: turn.role === "assistant" ? "model" : "user",
+      parts: [{ text: index === 0 && input.system ? `${input.system}\n\n${turn.text}` : turn.text }],
+    })),
+    generationConfig: {
+      temperature: input.temperature ?? Number(settings?.temperature ?? 0.2),
+      maxOutputTokens: settings?.max_tokens,
+      // Gemma 4 thinks by default (slow, eats output tokens); thinkingBudget is rejected.
+      ...(/^gemma-3/i.test(settings?.model_name ?? "") ? {} : { thinkingConfig: { thinkingLevel: "minimal" } }),
+    },
+  };
+};
+
+export const buildGeminiBody = (input: LlmCompletionInput, settings?: UserLlmSettings) => {
+  if (settings?.model_name && isGemmaModel(settings.model_name)) return buildGemmaBody(input, settings);
   const thinkingBudget = Number(process.env.LLM_THINKING_BUDGET);
 
   return {
@@ -172,7 +193,7 @@ export const requestLlmCompletion = async (
   const endpoint = settings?.endpoint?.trim() || process.env.LLM_MODEL_ENDPOINT?.trim() || "";
   const modelName = settings?.model_name?.trim() || process.env.LLM_MODEL?.trim() || "gpt-4o-mini";
   const provider = settings?.provider?.toLowerCase();
-  const isGemini = provider === "gemini" || endpoint.includes("generativelanguage.googleapis.com") || modelName.startsWith("gemini-");
+  const isGemini = provider === "gemini" || endpoint.includes("generativelanguage.googleapis.com") || modelName.startsWith("gemini-") || isGemmaModel(modelName);
   const isClaude = provider === "claude" || endpoint.includes("anthropic.com") || modelName.startsWith("claude-");
   const apiKey = settings?.api_key?.trim() || process.env.LLM_API_KEY?.trim();
   const resolvedEndpoint = settings?.endpoint?.trim() || (isGemini ? `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent` : isClaude ? "https://api.anthropic.com/v1/messages" : endpoint);
@@ -183,8 +204,8 @@ export const requestLlmCompletion = async (
   try {
     response = await fetch(finalEndpoint, {
       method: "POST",
-      headers: isClaude ? { "Content-Type": "application/json", Accept: "application/json", "x-api-key": apiKey || "", "anthropic-version": "2023-06-01" } : buildModelHeaders(apiKey),
-      body: JSON.stringify(isGemini ? buildGeminiBody(input, settings) : isClaude ? buildClaudeBody(input, settings) : buildChatCompletionsBody(input, modelName, settings)),
+      headers: isGemmaModel(modelName) ? { "Content-Type": "application/json", Accept: "application/json" } : isClaude ? { "Content-Type": "application/json", Accept: "application/json", "x-api-key": apiKey || "", "anthropic-version": "2023-06-01" } : buildModelHeaders(apiKey),
+      body: JSON.stringify(isGemini ? buildGeminiBody(input, { ...(settings ?? {}), model_name: modelName } as UserLlmSettings) : isClaude ? buildClaudeBody(input, settings) : buildChatCompletionsBody(input, modelName, settings)),
       signal: AbortSignal.timeout(Number(settings?.timeout_ms ?? process.env.LLM_TIMEOUT_MS ?? 30_000)),
     });
   } catch (error) {

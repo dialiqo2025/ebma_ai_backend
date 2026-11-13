@@ -34,6 +34,7 @@ import {
   requestSttBrowserToken,
   SttModelError,
 } from "./stt.model";
+import { applySpeakerRoles, classifyAgentCaller, hasSpeakerRoles } from "./stt.speaker-roles";
 import type {
   CreateSttSession,
   CreateSttTranscription,
@@ -711,10 +712,16 @@ const applyProviderJobSnapshot = async (
   job: Record<string, unknown>,
 ) => {
   const status = mapProviderTranscriptionStatus(job.status);
-  const result =
+  let result =
     status === "completed" && job.result && typeof job.result === "object"
       ? (job.result as Record<string, unknown>)
       : null;
+
+  // Two-speaker diarized calls get Agent / Caller labels; others keep Speaker N.
+  if (result && row.diarize && row.status !== "completed") {
+    const roles = await classifyAgentCaller(result);
+    if (roles) result = applySpeakerRoles(result, roles);
+  }
   const error =
     job.error && typeof job.error === "object"
       ? (job.error as { code?: string; message?: string })
@@ -1256,8 +1263,28 @@ export const downloadSttTranscription = async (
   const safeName = (row.original_filename || "transcript").replace(/\.[^.]+$/, "");
 
   // Arabic WS jobs store the transcript locally — no upstream download.
-  if (isArabicWsJobId(row.provider_job_id)) {
+  // Agent/Caller-labeled jobs are rendered locally too, since upstream files say "Speaker N".
+  const withRoles = hasSpeakerRoles(row.result_json);
+  if (isArabicWsJobId(row.provider_job_id) || withRoles) {
     const text = (row.transcript || "").trim();
+    const cueText = (seg: { text?: string; speaker?: unknown }) => {
+      const body = String(seg.text || "").trim();
+      return withRoles && typeof seg.speaker === "string" && seg.speaker ? `${seg.speaker}: ${body}` : body;
+    };
+    if (format === "txt" && withRoles) {
+      const lines = ((row.result_json as { segments?: unknown }).segments as Array<{ text?: string; speaker?: unknown }> | undefined ?? [])
+        .map(cueText)
+        .filter(Boolean)
+        .join("\n");
+      return {
+        file: {
+          content: Buffer.from(lines || text || " ", "utf8"),
+          contentType: "text/plain; charset=utf-8",
+          format,
+          fileName: `${safeName}.txt`,
+        },
+      };
+    }
     if (format === "txt") {
       return {
         file: {
@@ -1270,7 +1297,7 @@ export const downloadSttTranscription = async (
     }
     // Minimal SRT/VTT from stored segments when present.
     const segments = Array.isArray((row.result_json as { segments?: unknown } | null)?.segments)
-      ? ((row.result_json as { segments: Array<{ start?: number; end?: number; text?: string }> })
+      ? ((row.result_json as { segments: Array<{ start?: number; end?: number; text?: string; speaker?: unknown }> })
           .segments)
       : [{ start: 0, end: Number(row.audio_seconds) || 1, text }];
 
@@ -1290,7 +1317,7 @@ export const downloadSttTranscription = async (
         .map((seg, i) => {
           const start = Number(seg.start) || 0;
           const end = Number(seg.end) || start + 1;
-          return `${i + 1}\n${ts(start, false)} --> ${ts(end, false)}\n${String(seg.text || "").trim()}\n`;
+          return `${i + 1}\n${ts(start, false)} --> ${ts(end, false)}\n${cueText(seg)}\n`;
         })
         .join("\n");
       return {
@@ -1309,7 +1336,7 @@ export const downloadSttTranscription = async (
         .map((seg) => {
           const start = Number(seg.start) || 0;
           const end = Number(seg.end) || start + 1;
-          return `${ts(start, true)} --> ${ts(end, true)}\n${String(seg.text || "").trim()}\n`;
+          return `${ts(start, true)} --> ${ts(end, true)}\n${cueText(seg)}\n`;
         })
         .join("\n");
     return {

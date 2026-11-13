@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { linkCurrentSttUpload, observeGpuCall } from "../observability/observability.provider";
 
 const tokenResponseValidator = z.object({
   token: z.string().min(1),
@@ -138,25 +139,56 @@ const modelFetch = async (
   init: RequestInit,
   timeout = timeoutMs(),
 ) => {
-  const { baseUrl, apiKey } = modelConfiguration();
+  // Resolve the display endpoint without throwing so even a missing GPU
+  // configuration is captured as a failed monitored upload with its source file.
+  const observedBaseUrl = process.env.EBMA_ASR_BACKEND_URL?.trim().replace(/\/+$/, "")
+    || "unconfigured://ebma-asr";
 
-  try {
-    return await fetch(`${baseUrl}${path}`, {
-      ...init,
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        ...init.headers,
-      },
-      signal: AbortSignal.timeout(timeout),
-    });
-  } catch (error) {
-    const timedOut = error instanceof Error && error.name === "TimeoutError";
-    throw new SttModelError(
-      timedOut ? "The EBMA ASR request timed out" : "The EBMA ASR backend is unavailable",
-      timedOut ? "model_timeout" : "model_unavailable",
-      timedOut ? 504 : 503,
-    );
-  }
+  const method = String(init.method || "GET").toUpperCase();
+  const operation = path.startsWith("/v1/transcriptions")
+    ? method === "POST" ? "create_transcription" : method === "DELETE" ? "delete_transcription" : "get_transcription"
+    : path.startsWith("/v1/tokens") ? "create_browser_token" : "health_check";
+  const uploadBody = method === "POST" && path.startsWith("/v1/transcriptions") && init.body instanceof Uint8Array
+    ? Buffer.from(init.body)
+    : undefined;
+  const originalName = new URL(path, "https://monitor.invalid").searchParams.get("filename") || "recording.bin";
+
+  return observeGpuCall<Response>({
+    service: "stt",
+    operation,
+    endpoint: `${observedBaseUrl}${path}`,
+    requestMetadata: { method, byteLength: uploadBody?.length, contentType: (init.headers as Record<string, string> | undefined)?.["Content-Type"] },
+    responseMetadata: (response) => ({ status: response.status, contentType: response.headers.get("content-type") }),
+    isSuccess: (response) => response.ok || (method === "DELETE" && response.status === 404),
+    upstreamStatus: (response) => response.status,
+    ...(uploadBody ? { artifact: {
+      data: uploadBody,
+      originalName,
+      ...((init.headers as Record<string, string> | undefined)?.["Content-Type"]
+        ? { contentType: (init.headers as Record<string, string>)["Content-Type"] }
+        : {}),
+    } } : {}),
+  }, async () => {
+    try {
+      const { baseUrl, apiKey } = modelConfiguration();
+      return await fetch(`${baseUrl}${path}`, {
+        ...init,
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          ...init.headers,
+        },
+        signal: AbortSignal.timeout(timeout),
+      });
+    } catch (error) {
+      if (error instanceof SttModelError) throw error;
+      const timedOut = error instanceof Error && error.name === "TimeoutError";
+      throw new SttModelError(
+        timedOut ? "The EBMA ASR request timed out" : "The EBMA ASR backend is unavailable",
+        timedOut ? "model_timeout" : "model_unavailable",
+        timedOut ? 504 : 503,
+      );
+    }
+  });
 };
 
 const modelErrorFromResponse = async (
@@ -347,7 +379,9 @@ export const createTranscriptionJob = async (input: CreateTranscriptionJobInput)
   }
 
   try {
-    return jobCreatedValidator.parse(await response.json());
+    const created = jobCreatedValidator.parse(await response.json());
+    linkCurrentSttUpload(created.job_id);
+    return created;
   } catch {
     throw new SttModelError(
       "The EBMA ASR backend returned an invalid transcription job response",

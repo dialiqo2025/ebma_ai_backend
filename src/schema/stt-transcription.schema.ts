@@ -24,6 +24,7 @@ export const SttTranscriptions = pgTable(
       .references(() => Users.user_uuid, { onDelete: "cascade" }),
     project_uuid: uuid("project_uuid").references(() => Projects.project_uuid, { onDelete: "set null" }),
     api_key_uuid: uuid("api_key_uuid").references(() => ApiKeys.key_uuid, { onDelete: "set null" }),
+    request_id: uuid("request_id"),
     provider_job_id: varchar("provider_job_id", { length: 255 }).notNull(),
     original_filename: varchar("original_filename", { length: 512 }).notNull(),
     content_type: varchar("content_type", { length: 255 }),

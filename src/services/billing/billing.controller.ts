@@ -303,6 +303,28 @@ export const BillingController = {
     );
     res.status(result.code).json(result.data);
   },
+  adminUserUsageEvents: async (req: Request, res: Response) => {
+    const from = new Date(String(req.query.from || ""));
+    const to = new Date(String(req.query.to || ""));
+    const userUuid = String(req.params.user_uuid || "");
+    if (
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(userUuid) ||
+      Number.isNaN(from.valueOf()) ||
+      Number.isNaN(to.valueOf()) ||
+      from > to
+    ) {
+      res.status(400).json({ success: false, message: "A valid user and date range are required", data: null });
+      return;
+    }
+    const result = await AdminBilling.getAdminUserUsageEvents(
+      userUuid,
+      from,
+      to,
+      Number(req.query.page) || 1,
+      Number(req.query.pageSize) || 20,
+    );
+    res.status(result.code).json(result.data);
+  },
   adminSignupFreeCredits: async (req: Request, res: Response) => {
     const result = req.method === "GET"
       ? await AdminBilling.getSignupFreeCreditSetting()

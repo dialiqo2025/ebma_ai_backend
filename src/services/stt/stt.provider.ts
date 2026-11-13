@@ -1,10 +1,13 @@
 import { and, asc, desc, eq, ilike, lt, sql } from "drizzle-orm";
+import { randomUUID } from "node:crypto";
 import { db } from "../../config/database/connection.database";
 import { SttSegments, SttSessions, SttTranscriptions } from "../../schema";
 import { HttpStatusCodes as Code } from "../../utils/httpType.util";
 import { GenResObj } from "../../utils/responseFormat.util";
 import { prepareTextForTts } from "../llm/llm.provider";
 import { recordUsage } from "../billing/billing.provider";
+import { recordSttResultObservation } from "../observability/observability.provider";
+import { currentRequestContext } from "../observability/observability.context";
 import {
   ARABIC_STT_LANGUAGE,
   hasLocalSttResult,
@@ -80,6 +83,7 @@ export const createSttSession = async (userUuid: string, payload: CreateSttSessi
       user_uuid: userUuid,
       project_uuid: projectUuid ?? null,
       api_key_uuid: apiKeyUuid ?? null,
+      request_id: currentRequestContext()?.requestId ?? null,
       language: payload.language,
       output_mode: payload.mode,
       sample_rate: isArabicSttLanguage(payload.language) ? 16000 : payload.sampleRate,
@@ -329,6 +333,7 @@ export const createSttBrowserToken = async (
       .update(SttSessions)
       .set({
         status: "connecting",
+        request_id: currentRequestContext()?.requestId ?? session.request_id,
         error_code: null,
         error_message: null,
         completed_at: null,
@@ -770,6 +775,18 @@ const applyProviderJobSnapshot = async (
     }
   }
 
+  if (["completed", "failed", "cancelled"].includes(status) && row.status !== status) {
+    void recordSttResultObservation({
+      transcriptionUuid: row.transcription_uuid,
+      providerReference: row.provider_job_id,
+      status: status as "completed" | "failed" | "cancelled",
+      transcript: updated?.transcript ?? row.transcript,
+      errorCode: updated?.error_code ?? null,
+      errorMessage: updated?.error_message ?? null,
+      result: updated?.result_json,
+    }).catch((error) => console.error("STT result monitoring failed:", error));
+  }
+
   return updated ?? row;
 };
 
@@ -829,6 +846,7 @@ export const startArabicTranscription = async (
         user_uuid: userUuid,
         project_uuid: projectUuid ?? null,
         api_key_uuid: apiKeyUuid ?? null,
+        request_id: currentRequestContext()?.requestId ?? null,
         provider_job_id: newArabicWsJobId(),
         original_filename: payload.filename,
         content_type: payload.contentType || null,
@@ -942,6 +960,19 @@ export const finishArabicTranscription = async (
     });
   }
 
+
+  if (updated) {
+    void recordSttResultObservation({
+      transcriptionUuid: updated.transcription_uuid,
+      providerReference: updated.provider_job_id,
+      status: payload.status,
+      transcript: updated.transcript,
+      errorCode: updated.error_code,
+      errorMessage: updated.error_message,
+      result: updated.result_json,
+    }).catch((error) => console.error("Arabic STT result monitoring failed:", error));
+  }
+
   return GenResObj(
     Code.OK,
     true,
@@ -973,6 +1004,26 @@ export const createSttTranscription = async (
       "Arabic files cannot be uploaded: send a JSON request without a file and stream the audio over the returned connection",
     );
   }
+
+  const [operation] = await db
+    .insert(SttTranscriptions)
+    .values({
+      user_uuid: userUuid,
+      project_uuid: projectUuid ?? null,
+      api_key_uuid: apiKeyUuid ?? null,
+      request_id: currentRequestContext()?.requestId ?? null,
+      provider_job_id: `pending:${randomUUID()}`,
+      original_filename: file.originalname || "recording",
+      content_type: file.mimetype || null,
+      file_size_bytes: file.size,
+      language: payload.language,
+      diarize: payload.diarize,
+      speakers: payload.speakers ?? null,
+      status: "queued",
+      stage: "uploading",
+    })
+    .returning();
+  if (!operation) throw new Error("STT transcription operation creation failed");
 
   try {
     const jobInput = {
@@ -1032,20 +1083,14 @@ export const createSttTranscription = async (
     const created = await createTranscriptionJob(jobInput);
 
     const [row] = await db
-      .insert(SttTranscriptions)
-      .values({
-        user_uuid: userUuid,
-        project_uuid: projectUuid ?? null,
-        api_key_uuid: apiKeyUuid ?? null,
+      .update(SttTranscriptions)
+      .set({
         provider_job_id: created.job_id,
-        original_filename: file.originalname || "recording",
-        content_type: file.mimetype || null,
-        file_size_bytes: file.size,
-        language: payload.language,
-        diarize: payload.diarize,
-        speakers: payload.speakers ?? null,
         status: mapProviderTranscriptionStatus(created.status ?? "queued"),
+        stage: "queued",
+        updated_at: new Date(),
       })
+      .where(eq(SttTranscriptions.transcription_uuid, operation.transcription_uuid))
       .returning();
 
     if (!row) throw new Error("STT transcription creation failed");
@@ -1070,8 +1115,19 @@ export const createSttTranscription = async (
       console.error("Unexpected STT transcription upload error:", error);
     }
 
+    const [failed] = await db.update(SttTranscriptions).set({
+      status: "failed",
+      stage: "failed",
+      progress: 1,
+      error_code: modelError.code,
+      error_message: modelError.message,
+      completed_at: new Date(),
+      updated_at: new Date(),
+    }).where(eq(SttTranscriptions.transcription_uuid, operation.transcription_uuid)).returning();
+
     return GenResObj(modelError.httpStatus, false, modelError.message, {
       error: { code: modelError.code, message: modelError.message },
+      transcription: failed ? serializeSttTranscription(failed) : undefined,
     });
   }
 };

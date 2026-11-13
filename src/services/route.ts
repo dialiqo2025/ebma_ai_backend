@@ -13,6 +13,8 @@ import Translate from "./translate/translate.route";
 import Playground from "./playground/playground.route";
 import Projects from "./projects/projects.route";
 import Contact from "./contact/contact.route";
+import Observability from "./observability/observability.route";
+import GpuHealth from "./gpu-health/gpu-health.route";
 
 const router = Router();
 
@@ -30,5 +32,7 @@ router.use("/translate", Translate);
 router.use("/playground", Playground);
 router.use("/projects", Projects);
 router.use("/contact", Contact);
+router.use("/observability", Observability);
+router.use("/gpu-health", GpuHealth);
 
 export default router;

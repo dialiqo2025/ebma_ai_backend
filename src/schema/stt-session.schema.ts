@@ -24,6 +24,7 @@ export const SttSessions = pgTable(
       .references(() => Users.user_uuid, { onDelete: "cascade" }),
     project_uuid: uuid("project_uuid").references(() => Projects.project_uuid, { onDelete: "set null" }),
     api_key_uuid: uuid("api_key_uuid").references(() => ApiKeys.key_uuid, { onDelete: "set null" }),
+    request_id: uuid("request_id"),
     language: varchar("language", { length: 8 }).default("hi").notNull(),
     output_mode: sttOutputModeEnum("output_mode").default("native").notNull(),
     sample_rate: integer("sample_rate").default(16000).notNull(),

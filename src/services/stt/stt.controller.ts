@@ -174,7 +174,8 @@ export const SttController = {
 
   createTranscription: async (req: Request, res: Response, next: NextFunction) => {
     try {
-      // Arabic has no upload endpoint: a JSON request starts a browser stream instead.
+      // Arabic without a file: a JSON request starts a browser stream. Arabic with a file is uploaded like any other
+      // language (EBMA ASR Arabic's /ar/v1/transcriptions, optional speaker identification).
       if (!req.file && req.body?.language === "ar") {
         sendProviderResponse(
           res,

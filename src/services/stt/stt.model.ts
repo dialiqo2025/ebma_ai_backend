@@ -357,6 +357,149 @@ export const createTranscriptionJob = async (input: CreateTranscriptionJobInput)
   }
 };
 
+const parakeetResponseValidator = z.object({
+  text: z.string(),
+  duration: z.number().nonnegative(),
+  words: z.array(
+    z.object({
+      word: z.string(),
+      start: z.number(),
+      end: z.number(),
+      speaker: z.string().nullable().optional(),
+    }),
+  ),
+  speakers: z
+    .array(z.object({ id: z.string(), speech_seconds: z.number() }))
+    .optional(),
+});
+
+const PARAKEET_SEGMENT_MAX_WORDS = 15;
+const PARAKEET_SEGMENT_MAX_GAP_SECONDS = 0.8;
+
+const parakeetSegmentsFromWords = (
+  words: z.infer<typeof parakeetResponseValidator>["words"],
+) => {
+  const segments: Array<{ start: number; end: number; text: string; speaker?: string }> = [];
+  let current: typeof words = [];
+
+  const flush = () => {
+    const first = current[0];
+    const last = current[current.length - 1];
+    if (first && last) {
+      segments.push({
+        start: first.start,
+        end: last.end,
+        text: current.map((word) => word.word).join(" "),
+        ...(first.speaker ? { speaker: first.speaker } : {}),
+      });
+    }
+    current = [];
+  };
+
+  for (const word of words) {
+    const previous = current[current.length - 1];
+    if (
+      previous &&
+      (current.length >= PARAKEET_SEGMENT_MAX_WORDS ||
+        word.speaker !== previous.speaker ||
+        word.start - previous.end >= PARAKEET_SEGMENT_MAX_GAP_SECONDS)
+    ) {
+      flush();
+    }
+    current.push(word);
+  }
+  flush();
+
+  return segments;
+};
+
+/** One paragraph per speaker turn, the same layout as EBMA ASR's result text. */
+const parakeetTextWithSpeakers = (
+  segments: ReturnType<typeof parakeetSegmentsFromWords>,
+) => {
+  const lines: string[] = [];
+  let lastSpeaker: string | undefined;
+  for (const segment of segments) {
+    if (lines.length > 0 && segment.speaker === lastSpeaker) {
+      lines[lines.length - 1] += ` ${segment.text}`;
+    } else {
+      lines.push(`${segment.speaker}: ${segment.text}`);
+    }
+    lastSpeaker = segment.speaker;
+  }
+  return lines.join("\n\n");
+};
+
+const transcribeWithParakeet = async (
+  baseUrl: string,
+  apiKey: string,
+  input: CreateTranscriptionJobInput,
+) => {
+  const form = new FormData();
+  form.append(
+    "file",
+    new Blob([new Uint8Array(input.file)], {
+      type: input.contentType || "application/octet-stream",
+    }),
+    input.filename,
+  );
+  form.append("response_format", "verbose_json");
+  if (input.diarize) {
+    form.append("diarize", "true");
+    if (input.speakers !== undefined) form.append("speakers", String(input.speakers));
+  }
+
+  const response = await fetch(`${baseUrl}/v1/audio/transcriptions`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${apiKey}` },
+    body: form,
+    signal: AbortSignal.timeout(uploadTimeoutMs()),
+  });
+
+  if (!response.ok) {
+    let code: unknown;
+    try {
+      code = (await response.json())?.error?.code;
+    } catch {
+      code = undefined;
+    }
+    throw new Error(`Parakeet returned ${response.status} ${code ?? ""}`.trim());
+  }
+
+  const result = parakeetResponseValidator.parse(await response.json());
+  const segments = parakeetSegmentsFromWords(result.words);
+  return {
+    text: input.diarize ? parakeetTextWithSpeakers(segments) : result.text,
+    durationSeconds: result.duration,
+    segments,
+    speakers: result.speakers ?? [],
+  };
+};
+
+/**
+ * Parakeet is English-only and answers in the request instead of creating a job.
+ * Returns null when it should not or could not handle the file (too long,
+ * unsupported format, down): callers then use the EBMA ASR job flow.
+ */
+export const tryParakeetTranscription = async (
+  input: CreateTranscriptionJobInput,
+) => {
+  const baseUrl = process.env.EBMA_ASR_PARAKEET_URL?.trim().replace(/\/+$/, "");
+  const apiKey = process.env.EBMA_ASR_API_KEY?.trim();
+  // Speaker identification on Parakeet is disabled for now: those files use EBMA ASR.
+  if (!baseUrl || !apiKey || input.language !== "en" || input.diarize) return null;
+
+  try {
+    return await transcribeWithParakeet(baseUrl, apiKey, input);
+  } catch (error) {
+    console.warn(
+      "Parakeet transcription failed, using EBMA ASR:",
+      error instanceof Error ? error.message : error,
+    );
+    return null;
+  }
+};
+
 export const getTranscriptionJob = async (jobId: string) => {
   const response = await modelFetch(
     `/v1/transcriptions/${encodeURIComponent(jobId)}`,

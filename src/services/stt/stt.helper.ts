@@ -47,6 +47,13 @@ export const isArabicWsJobId = (jobId: string) => jobId.startsWith("arabic-ws:")
 
 export const newArabicWsJobId = () => `arabic-ws:${randomUUID()}`;
 
+// Parakeet answers in the upload request, so these rows have no upstream job either.
+export const newParakeetJobId = () => `parakeet:${randomUUID()}`;
+
+// The transcript lives only in our database: nothing upstream to download or delete.
+export const hasLocalSttResult = (jobId: string) =>
+  isArabicWsJobId(jobId) || jobId.startsWith("parakeet:");
+
 export const isSttModelConfigured = () =>
   Boolean(
     process.env.EBMA_ASR_BACKEND_URL?.trim() && process.env.EBMA_ASR_API_KEY?.trim(),

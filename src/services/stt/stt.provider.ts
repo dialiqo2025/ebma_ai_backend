@@ -7,6 +7,7 @@ import { prepareTextForTts } from "../llm/llm.provider";
 import { recordUsage } from "../billing/billing.provider";
 import {
   ARABIC_STT_LANGUAGE,
+  hasLocalSttResult,
   INDIC_STT_LANGUAGES,
   isArabicSttLanguage,
   isArabicWsJobId,
@@ -14,6 +15,7 @@ import {
   mapProviderTranscriptionStatus,
   maxUploadBytes,
   newArabicWsJobId,
+  newParakeetJobId,
   serializeSttSegment,
   serializeSttSession,
   serializeSttTranscription,
@@ -29,6 +31,7 @@ import {
   getTranscriptionJob,
   requestSttBrowserToken,
   SttModelError,
+  tryParakeetTranscription,
 } from "./stt.model";
 import type {
   CreateSttSession,
@@ -972,14 +975,61 @@ export const createSttTranscription = async (
   }
 
   try {
-    const created = await createTranscriptionJob({
+    const jobInput = {
       file: file.buffer,
       filename: file.originalname || "recording",
       contentType: file.mimetype,
       language: payload.language,
       diarize: payload.diarize,
       ...(payload.speakers !== undefined ? { speakers: payload.speakers } : {}),
-    });
+    };
+
+    const parakeet = await tryParakeetTranscription(jobInput);
+    if (parakeet) {
+      const [pending] = await db
+        .insert(SttTranscriptions)
+        .values({
+          user_uuid: userUuid,
+          project_uuid: projectUuid ?? null,
+          api_key_uuid: apiKeyUuid ?? null,
+          provider_job_id: newParakeetJobId(),
+          original_filename: jobInput.filename,
+          content_type: file.mimetype || null,
+          file_size_bytes: file.size,
+          language: payload.language,
+          diarize: payload.diarize,
+          speakers: payload.speakers ?? null,
+          status: "processing",
+        })
+        .returning();
+
+      if (!pending) throw new Error("STT transcription creation failed");
+
+      // Same path as a finished upstream job, so storage and billing stay identical.
+      const completed = await applyProviderJobSnapshot(pending, {
+        status: "completed",
+        stage: "done",
+        progress: 1,
+        audio_seconds: parakeet.durationSeconds,
+        result: {
+          text: parakeet.text,
+          duration_s: parakeet.durationSeconds,
+          segments: parakeet.segments,
+          speakers: parakeet.speakers,
+          diarized: payload.diarize,
+          protocol: "parakeet",
+        },
+      });
+
+      return GenResObj(
+        Code.ACCEPTED,
+        true,
+        "Transcription completed successfully",
+        serializeSttTranscription(completed),
+      );
+    }
+
+    const created = await createTranscriptionJob(jobInput);
 
     const [row] = await db
       .insert(SttTranscriptions)
@@ -1185,8 +1235,8 @@ export const downloadSttTranscription = async (
 
   const safeName = (row.original_filename || "transcript").replace(/\.[^.]+$/, "");
 
-  // Arabic WS jobs store the transcript locally — no upstream download.
-  if (isArabicWsJobId(row.provider_job_id)) {
+  // Arabic WS and Parakeet jobs store the transcript locally — no upstream download.
+  if (hasLocalSttResult(row.provider_job_id)) {
     const text = (row.transcript || "").trim();
     if (format === "txt") {
       return {
@@ -1200,9 +1250,11 @@ export const downloadSttTranscription = async (
     }
     // Minimal SRT/VTT from stored segments when present.
     const segments = Array.isArray((row.result_json as { segments?: unknown } | null)?.segments)
-      ? ((row.result_json as { segments: Array<{ start?: number; end?: number; text?: string }> })
+      ? ((row.result_json as { segments: Array<{ start?: number; end?: number; text?: string; speaker?: string }> })
           .segments)
       : [{ start: 0, end: Number(row.audio_seconds) || 1, text }];
+    const cueText = (seg: { text?: string; speaker?: string }) =>
+      `${seg.speaker ? `${seg.speaker}: ` : ""}${String(seg.text || "").trim()}`;
 
     const pad = (n: number, w: number) => String(Math.floor(n)).padStart(w, "0");
     const ts = (seconds: number, vtt: boolean) => {
@@ -1220,7 +1272,7 @@ export const downloadSttTranscription = async (
         .map((seg, i) => {
           const start = Number(seg.start) || 0;
           const end = Number(seg.end) || start + 1;
-          return `${i + 1}\n${ts(start, false)} --> ${ts(end, false)}\n${String(seg.text || "").trim()}\n`;
+          return `${i + 1}\n${ts(start, false)} --> ${ts(end, false)}\n${cueText(seg)}\n`;
         })
         .join("\n");
       return {
@@ -1239,7 +1291,7 @@ export const downloadSttTranscription = async (
         .map((seg) => {
           const start = Number(seg.start) || 0;
           const end = Number(seg.end) || start + 1;
-          return `${ts(start, true)} --> ${ts(end, true)}\n${String(seg.text || "").trim()}\n`;
+          return `${ts(start, true)} --> ${ts(end, true)}\n${cueText(seg)}\n`;
         })
         .join("\n");
     return {
@@ -1285,7 +1337,7 @@ export const deleteSttTranscription = async (
   const row = await findOwnedTranscription(transcriptionUuid, userUuid);
   if (!row) return GenResObj(Code.NOT_FOUND, false, "STT transcription not found");
 
-  if (!isArabicWsJobId(row.provider_job_id)) {
+  if (!hasLocalSttResult(row.provider_job_id)) {
     try {
       await deleteTranscriptionJob(row.provider_job_id);
     } catch (error) {

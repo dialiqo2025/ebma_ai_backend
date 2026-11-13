@@ -8,6 +8,7 @@ import {
   deleteTranscriptionJob,
   getTranscriptionJob,
   SttModelError,
+  tryParakeetTranscription,
 } from "../stt/stt.model";
 import { mapProviderTranscriptionStatus } from "../stt/stt.helper";
 import { isSttModelConfigured, STT_LANGUAGES } from "../stt/stt.helper";
@@ -279,20 +280,27 @@ export const runPlaygroundStt = async (req: Request, file: Express.Multer.File) 
 
   let jobId: string | null = null;
   try {
-    const created = await createTranscriptionJob({
+    const jobInput = {
       file: file.buffer,
       filename: file.originalname || "playground.webm",
       contentType: file.mimetype,
       language: "en",
       diarize: false,
-    });
-    jobId = created.job_id;
+    };
 
-    const polled = await pollTranscriptionText(jobId);
-    if (!polled.ok) {
-      return GenResObj(Code.UNPROCESSABLE_ENTITY, false, polled.message, {
-        code: polled.code,
-      });
+    const parakeet = await tryParakeetTranscription(jobInput);
+    let transcript = parakeet?.text.trim();
+    if (transcript === undefined) {
+      const created = await createTranscriptionJob(jobInput);
+      jobId = created.job_id;
+
+      const polled = await pollTranscriptionText(jobId);
+      if (!polled.ok) {
+        return GenResObj(Code.UNPROCESSABLE_ENTITY, false, polled.message, {
+          code: polled.code,
+        });
+      }
+      transcript = polled.text;
     }
 
     const consumed = await consumeTrial(ipHash, "stt", limit);
@@ -300,7 +308,7 @@ export const runPlaygroundStt = async (req: Request, file: Express.Multer.File) 
 
     return GenResObj(Code.OK, true, "STT playground transcription ready", {
       api: "stt",
-      transcript: polled.text,
+      transcript,
       ...trialMeta(consumed.remaining, limit),
     });
   } catch (error) {

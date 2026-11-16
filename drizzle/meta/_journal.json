@@ -281,6 +281,20 @@
       "when": 1794472561606,
       "tag": "0039_even_vampiro",
       "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "7",
+      "when": 1794572054025,
+      "tag": "0040_tiresome_freak",
+      "breakpoints": true
+    },
+    {
+      "idx": 41,
+      "version": "7",
+      "when": 1794816592193,
+      "tag": "0041_breezy_stardust",
+      "breakpoints": true
     }
   ]
 }

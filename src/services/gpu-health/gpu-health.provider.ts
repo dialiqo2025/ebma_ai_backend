@@ -1,4 +1,4 @@
-import { and, desc, eq, ilike, lt, or, sql } from "drizzle-orm";
+import { and, desc, eq, gte, ilike, inArray, lt, or, sql } from "drizzle-orm";
 import { db } from "../../config/database/connection.database";
 import {
   GpuHealthCheckLogs,
@@ -82,6 +82,12 @@ export const updateGpuHealthSettings = async (input: {
   checkIntervalMinutes: number;
   retentionDays: number;
   notificationsEnabled: boolean;
+  notifyHealthy: boolean;
+  notifyHighUsage: boolean;
+  notifyUnhealthy: boolean;
+  notifyRecovered: boolean;
+  highUsageThresholdPercent: number;
+  repeatAlertMinutes: number;
 }, userUuid: string) => {
   const nextCheckAt = new Date(Date.now() + input.checkIntervalMinutes * 60_000);
   const [settings] = await db.insert(GpuHealthMonitorSettings).values({
@@ -90,6 +96,12 @@ export const updateGpuHealthSettings = async (input: {
     check_interval_minutes: input.checkIntervalMinutes,
     retention_days: input.retentionDays,
     notifications_enabled: input.notificationsEnabled,
+    notify_healthy: input.notifyHealthy,
+    notify_high_usage: input.notifyHighUsage,
+    notify_unhealthy: input.notifyUnhealthy,
+    notify_recovered: input.notifyRecovered,
+    high_usage_threshold_percent: input.highUsageThresholdPercent,
+    repeat_alert_minutes: input.repeatAlertMinutes,
     next_check_at: nextCheckAt,
     updated_by: userUuid,
     updated_at: new Date(),
@@ -100,6 +112,12 @@ export const updateGpuHealthSettings = async (input: {
       check_interval_minutes: input.checkIntervalMinutes,
       retention_days: input.retentionDays,
       notifications_enabled: input.notificationsEnabled,
+      notify_healthy: input.notifyHealthy,
+      notify_high_usage: input.notifyHighUsage,
+      notify_unhealthy: input.notifyUnhealthy,
+      notify_recovered: input.notifyRecovered,
+      high_usage_threshold_percent: input.highUsageThresholdPercent,
+      repeat_alert_minutes: input.repeatAlertMinutes,
       next_check_at: nextCheckAt,
       updated_by: userUuid,
       updated_at: new Date(),
@@ -126,17 +144,25 @@ export const removeGpuHealthRecipient = async (recipientUuid: string) => {
   return removed ?? null;
 };
 
-const checkContext = (current: "healthy" | "unhealthy", previous?: string) => {
-  if (!previous) return current === "healthy" ? "initial_healthy" : "incident_detected";
-  if (current === "healthy" && previous === "unhealthy") return "recovered";
-  if (current === "unhealthy" && previous === "healthy") return "incident_detected";
-  return current === "healthy" ? "routine_healthy" : "still_unhealthy";
+type HealthStatus = "healthy" | "high_usage" | "unhealthy";
+
+const checkContext = (current: HealthStatus, previous?: string) => {
+  if (!previous) {
+    if (current === "healthy") return "initial_healthy";
+    return current === "high_usage" ? "high_usage_detected" : "incident_detected";
+  }
+  if (current === "healthy" && previous !== "healthy") return "recovered";
+  if (current === "high_usage") return previous === "high_usage" ? "still_high_usage" : "high_usage_detected";
+  if (current === "unhealthy") return previous === "unhealthy" ? "still_unhealthy" : "incident_detected";
+  return "routine_healthy";
 };
 
 const contextLabel: Record<string, string> = {
   initial_healthy: "Initial health check passed",
   routine_healthy: "GPU service is healthy",
   recovered: "GPU service recovered",
+  high_usage_detected: "GPU service usage is high",
+  still_high_usage: "GPU service remains under high load",
   incident_detected: "GPU service incident detected",
   still_unhealthy: "GPU service remains unavailable",
 };
@@ -167,6 +193,76 @@ const readableCheckTime = (date: Date) => {
   }
 };
 
+type HealthMetrics = {
+  usagePercent: number | null;
+  activeWorkload: number | null;
+  capacity: number | null;
+  queueDepth: number | null;
+  highUsage: boolean;
+};
+
+const nonNegativeNumber = (value: unknown) => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+};
+
+export const classifyGpuHealthMetrics = (body: string | null, thresholdPercent: number): HealthMetrics => {
+  if (!body) return { usagePercent: null, activeWorkload: null, capacity: null, queueDepth: null, highUsage: false };
+  try {
+    const payload = JSON.parse(body) as Record<string, unknown>;
+    const activeSessions = nonNegativeNumber(payload.active_sessions);
+    const jobsActive = nonNegativeNumber(payload.jobs_active);
+    const jobsQueued = nonNegativeNumber(payload.jobs_queued);
+    const queueDepth = nonNegativeNumber(payload.queue_depth);
+    const capacity = nonNegativeNumber(payload.max_sessions);
+    const activeWorkload = Math.max(activeSessions ?? 0, (jobsActive ?? 0) + (jobsQueued ?? 0));
+    const usagePercent = capacity && capacity > 0
+      ? Math.min(100, Math.round((activeWorkload / capacity) * 100))
+      : null;
+    const queued = Math.max(jobsQueued ?? 0, queueDepth ?? 0);
+    return {
+      usagePercent,
+      activeWorkload: activeSessions !== null || jobsActive !== null || jobsQueued !== null ? activeWorkload : null,
+      capacity,
+      queueDepth: queueDepth ?? jobsQueued,
+      highUsage: queued > 0 || (usagePercent !== null && usagePercent >= thresholdPercent),
+    };
+  } catch {
+    return { usagePercent: null, activeWorkload: null, capacity: null, queueDepth: null, highUsage: false };
+  }
+};
+
+const notificationPreference = (
+  log: typeof GpuHealthCheckLogs.$inferSelect,
+  settings: typeof GpuHealthMonitorSettings.$inferSelect,
+) => {
+  if (log.context === "recovered") return settings.notify_recovered;
+  if (log.status === "healthy") return settings.notify_healthy;
+  if (log.status === "high_usage") return settings.notify_high_usage;
+  return settings.notify_unhealthy;
+};
+
+const shouldNotify = async (
+  log: typeof GpuHealthCheckLogs.$inferSelect,
+  settings: typeof GpuHealthMonitorSettings.$inferSelect,
+) => {
+  if (!notificationPreference(log, settings)) return { send: false, status: "filtered" } as const;
+  const isNewState = ["initial_healthy", "recovered", "high_usage_detected", "incident_detected"].includes(log.context);
+  if (isNewState) return { send: true, status: null } as const;
+  const cutoff = new Date(log.checked_at.valueOf() - settings.repeat_alert_minutes * 60_000);
+  const [recent] = await db.select({ id: GpuHealthCheckLogs.check_uuid })
+    .from(GpuHealthCheckLogs)
+    .where(and(
+      eq(GpuHealthCheckLogs.status, log.status),
+      gte(GpuHealthCheckLogs.checked_at, cutoff),
+      lt(GpuHealthCheckLogs.checked_at, log.checked_at),
+      inArray(GpuHealthCheckLogs.notification_status, ["sent", "partially_sent"]),
+    )).orderBy(desc(GpuHealthCheckLogs.checked_at)).limit(1);
+  return recent
+    ? { send: false, status: "suppressed_cooldown" } as const
+    : { send: true, status: null } as const;
+};
+
 const notifyRecipients = async (log: typeof GpuHealthCheckLogs.$inferSelect) => {
   const recipients = await db.select().from(GpuHealthRecipients);
   if (!recipients.length) {
@@ -183,8 +279,10 @@ const notifyRecipients = async (log: typeof GpuHealthCheckLogs.$inferSelect) => 
     `Endpoint: ${log.endpoint}.`,
     `Response time: ${log.duration_ms} ms.`,
     `HTTP status: ${log.http_status ?? "not received"}.`,
+    log.usage_percent === null ? "" : `Usage: ${log.usage_percent}% (${log.active_workload ?? 0}/${log.capacity ?? "unknown"} active capacity).`,
+    log.queue_depth === null ? "" : `Queue depth: ${log.queue_depth}.`,
     log.error_message ? `Details: ${log.error_message}` : "The GPU health endpoint responded successfully.",
-  ].join(" ");
+  ].filter(Boolean).join(" ");
   const email = renderEbmaNoticeEmail({
     name: "Operations team",
     title,
@@ -246,7 +344,7 @@ export const runGpuHealthCheck = async (trigger: "scheduled" | "manual") => {
   const started = Date.now();
   let endpoint = "Not configured";
   let method = "GET";
-  let status: "healthy" | "unhealthy" = "unhealthy";
+  let status: HealthStatus = "unhealthy";
   let httpStatus: number | null = null;
   let body: string | null = null;
   let errorCode: string | null = null;
@@ -275,6 +373,11 @@ export const runGpuHealthCheck = async (trigger: "scheduled" | "manual") => {
     errorMessage = error instanceof Error ? error.message : "GPU health check failed";
   }
 
+  const metrics = status === "healthy"
+    ? classifyGpuHealthMetrics(body, settings.high_usage_threshold_percent)
+    : { usagePercent: null, activeWorkload: null, capacity: null, queueDepth: null, highUsage: false };
+  if (status === "healthy" && metrics.highUsage) status = "high_usage";
+
   const [inserted] = await db.insert(GpuHealthCheckLogs).values({
     trigger,
     status,
@@ -286,12 +389,19 @@ export const runGpuHealthCheck = async (trigger: "scheduled" | "manual") => {
     response_body: body,
     error_code: errorCode,
     error_message: errorMessage,
+    usage_percent: metrics.usagePercent,
+    active_workload: metrics.activeWorkload,
+    capacity: metrics.capacity,
+    queue_depth: metrics.queueDepth,
     checked_at: new Date(),
   }).returning();
   let result = inserted!;
 
   if (settings.notifications_enabled) {
-    const delivery = await notifyRecipients(result);
+    const decision = await shouldNotify(result, settings);
+    const delivery = decision.send
+      ? await notifyRecipients(result)
+      : { status: decision.status, count: 0, error: null };
     const [updated] = await db.update(GpuHealthCheckLogs).set({
       notification_status: delivery.status,
       notification_recipient_count: delivery.count,
@@ -319,7 +429,7 @@ export const claimAndRunScheduledGpuHealthCheck = async () => {
 export const listGpuHealthChecks = async (query: Record<string, unknown>) => {
   const page = clampInteger(query.page, 1, 1, 1_000_000);
   const pageSize = clampInteger(query.pageSize, 25, 1, 100);
-  const status = query.status === "healthy" || query.status === "unhealthy" ? query.status : undefined;
+  const status = query.status === "healthy" || query.status === "high_usage" || query.status === "unhealthy" ? query.status : undefined;
   const search = typeof query.search === "string" ? query.search.trim().slice(0, 200) : "";
   const filters = and(
     status ? eq(GpuHealthCheckLogs.status, status) : undefined,

@@ -10,5 +10,6 @@ export * from "./api-key.schema";
 export * from "./playground-trial.schema";
 export * from "./project.schema";
 export * from "./daily-user-report.schema";
+export * from "./daily-usage-report.schema";
 export * from "./observability.schema";
 export * from "./gpu-health-monitor.schema";

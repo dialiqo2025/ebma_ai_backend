@@ -10,6 +10,8 @@
     "start": "node dist/index.js",
     "report:new-users": "node dist/jobs/daily-new-users-report.js",
     "report:new-users:dev": "tsx src/jobs/daily-new-users-report.ts",
+    "report:usage": "node dist/jobs/daily-usage-report.js",
+    "report:usage:dev": "tsx src/jobs/daily-usage-report.ts",
     "generate": "drizzle-kit generate",
     "migrate": "drizzle-kit migrate"
   },

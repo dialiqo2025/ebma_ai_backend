@@ -23,6 +23,12 @@ const settingsValidator = z.object({
   checkIntervalMinutes: z.coerce.number().int().min(1).max(10_080),
   retentionDays: z.coerce.number().int().min(1).max(3650),
   notificationsEnabled: z.boolean(),
+  notifyHealthy: z.boolean().default(false),
+  notifyHighUsage: z.boolean().default(true),
+  notifyUnhealthy: z.boolean().default(true),
+  notifyRecovered: z.boolean().default(false),
+  highUsageThresholdPercent: z.coerce.number().int().min(1).max(100).default(80),
+  repeatAlertMinutes: z.coerce.number().int().min(1).max(10_080).default(60),
 }).strict();
 const recipientValidator = z.object({ email: z.email().max(320) }).strict();
 const uuidValidator = z.uuid();

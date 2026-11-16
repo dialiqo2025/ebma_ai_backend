@@ -186,6 +186,26 @@ export const renderDailyNewUsersReportEmail = (params: {
     `${params.userCount} new user registrations for ${params.reportDate}.`,
   );
 
+export const renderDailyUsageReportEmail = (params: {
+  reportDate: string;
+  timezone: string;
+  userCount: number;
+  requestCount: number;
+  creditsUsed: number;
+}) =>
+  emailShell(
+    `${eyebrow("Daily usage report")}
+     <h1 style="margin:22px 0 12px;color:#1D1B2E;font-family:'Space Grotesk',Inter,'Segoe UI',Arial,sans-serif;font-size:31px;line-height:39px;letter-spacing:-.8px;">User usage and processing</h1>
+     <p style="margin:0;color:#667085;font-size:14px;line-height:23px;">Attached are the user summary${params.requestCount ? " and request-detail" : ""} CSV reports for ${escapeHtml(params.reportDate)} (${escapeHtml(params.timezone)}). Status totals come from persisted processing records; credits come from the billing ledger.</p>
+     <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="margin-top:26px;"><tr>
+       <td style="padding:18px;border:1px solid #DDD6F5;border-radius:14px;background:#F8F7FF;"><div style="color:#6542E8;font-size:10px;font-weight:800;text-transform:uppercase;">Users</div><div style="margin-top:7px;font-size:25px;font-weight:800;">${params.userCount}</div></td>
+       <td style="width:12px;"></td><td style="padding:18px;border:1px solid #DDD6F5;border-radius:14px;background:#F8F7FF;"><div style="color:#6542E8;font-size:10px;font-weight:800;text-transform:uppercase;">Requests</div><div style="margin-top:7px;font-size:25px;font-weight:800;">${params.requestCount}</div></td>
+       <td style="width:12px;"></td><td style="padding:18px;border:1px solid #DDD6F5;border-radius:14px;background:#F8F7FF;"><div style="color:#6542E8;font-size:10px;font-weight:800;text-transform:uppercase;">Credits</div><div style="margin-top:7px;font-size:25px;font-weight:800;">${params.creditsUsed.toFixed(2)}</div></td>
+     </tr></table>
+     <div style="margin-top:22px;color:#8B849C;font-size:12px;line-height:19px;">This report contains private account and operational information. Store and share it only with authorized recipients.</div>`,
+    `${params.requestCount} processed requests and ${params.creditsUsed.toFixed(2)} credits for ${params.reportDate}.`,
+  );
+
 const resendAttachments = (attachments: Mail.Attachment[] | undefined) =>
   attachments?.map((attachment) => {
     if (!attachment.filename) throw new Error("Resend attachments require a filename");

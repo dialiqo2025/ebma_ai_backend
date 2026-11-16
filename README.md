@@ -13,6 +13,42 @@ npm run build
 npm run report:new-users
 ```
 
+## Daily user-usage CSV report
+
+The user-usage report is separate from the new-registration report. It emails an active-user
+summary CSV and, by default, a request-detail CSV for the previous local calendar day. Status
+comes from persisted STT/TTS operations and Assistant/Translation API records; quantities and
+credits come from the billing ledger. Failed operations remain visible with zero credits when
+they were not billed.
+
+```bash
+npm run build
+npm run migrate
+npm run report:usage
+```
+
+For a controlled backfill or test:
+
+```bash
+npm run report:usage:dev -- --date=2026-10-20
+```
+
+Configuration:
+
+```env
+DAILY_USAGE_REPORT_ENABLED=true
+DAILY_USAGE_REPORT_TO_EMAIL=operations@example.com
+DAILY_USAGE_REPORT_TIMEZONE=Asia/Kolkata
+DAILY_USAGE_REPORT_SEND_EMPTY=false
+DAILY_USAGE_REPORT_INCLUDE_DETAILS=true
+```
+
+When the usage-specific recipient or timezone is empty, the job falls back to the matching
+`DAILY_USER_REPORT_*` setting for backward-compatible deployment. Each report date is claimed
+in `daily_usage_reports`, so completed deliveries are not sent twice and failed/stale runs can
+be retried safely. Schedule `npm run report:usage` with the same `30 18 * * *` UTC expression
+when reports should cover midnight-to-midnight in Asia/Kolkata.
+
 For a controlled backfill or test, run the source job with an explicit local report date:
 
 ```bash
@@ -31,6 +67,15 @@ cron expressions in UTC, so midnight in Asia/Kolkata is `30 18 * * *`. The cron 
 ```bash
 npm run report:new-users
 ```
+
+## GPU health alert conditions
+
+The superadmin GPU Health Monitor supports independent email conditions for healthy/running,
+high usage, unavailable, and recovered states. Defaults notify only for high usage and
+unavailable states. High usage is detected when the health response reaches the configured
+percentage of `max_sessions`, or when `jobs_queued` / `queue_depth` reports queued work.
+State changes notify immediately; unchanged states respect the configured repeat-alert interval.
+Apply the latest database migrations before using these settings.
 
 ## TTS API
 

@@ -1,4 +1,4 @@
-import type { Request, Response } from "express";
+import type { NextFunction, Request, Response } from "express";
 import * as Billing from "./billing.provider";
 import * as AdminBilling from "./billing.admin.provider";
 import {
@@ -18,6 +18,15 @@ import {
   createWalletTopupPaymentLink,
   handleRazorpayWebhook,
 } from "./razorpay.service";
+import {
+  buildUsageDetailsCsv,
+  buildUsageSummaryCsv,
+  loadUsageReport,
+  usageReportModules,
+  usageReportStatuses,
+  type UsageReportModule,
+  type UsageReportStatus,
+} from "./billing.usage-report";
 
 const userId = (req: Request) => req.user?.userId as string;
 
@@ -28,6 +37,39 @@ const parseProvider = (value: unknown): "stripe" | "razorpay" => {
 
 const isRazorpaySessionId = (sessionId: string) =>
   sessionId.startsWith("plink_") || sessionId.startsWith("pay_");
+
+class UsageReportInputError extends Error {}
+
+const usageReportFilters = (req: Request) => {
+  const from = new Date(String(req.query.from || ""));
+  const to = new Date(String(req.query.to || ""));
+  const minCredits = req.query.minCredits === undefined || req.query.minCredits === "" ? undefined : Number(req.query.minCredits);
+  const maxCredits = req.query.maxCredits === undefined || req.query.maxCredits === "" ? undefined : Number(req.query.maxCredits);
+  const timezone = String(req.query.timezone || "Asia/Kolkata").trim();
+  const module = String(req.query.module || "");
+  const status = String(req.query.status || "");
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: timezone }).format(new Date());
+  } catch {
+    throw new UsageReportInputError("Enter a valid IANA timezone");
+  }
+  if (Number.isNaN(from.valueOf()) || Number.isNaN(to.valueOf()) || from >= to) throw new UsageReportInputError("A valid date range is required");
+  if (
+    (minCredits !== undefined && (!Number.isFinite(minCredits) || minCredits < 0)) ||
+    (maxCredits !== undefined && (!Number.isFinite(maxCredits) || maxCredits < 0)) ||
+    (minCredits !== undefined && maxCredits !== undefined && minCredits > maxCredits)
+  ) throw new UsageReportInputError("Enter a valid credit usage range");
+  if (module && !usageReportModules.includes(module as UsageReportModule)) throw new UsageReportInputError("Enter a valid usage module");
+  if (status && !usageReportStatuses.includes(status as UsageReportStatus)) throw new UsageReportInputError("Enter a valid request status");
+  return {
+    from, to, timezone,
+    ...(String(req.query.search || "").trim() ? { search: String(req.query.search).trim() } : {}),
+    ...(minCredits !== undefined ? { minCredits } : {}),
+    ...(maxCredits !== undefined ? { maxCredits } : {}),
+    ...(module ? { module: module as UsageReportModule } : {}),
+    ...(status ? { status: status as UsageReportStatus } : {}),
+  };
+};
 
 export const BillingController = {
   publicPricing: async (_req: Request, res: Response) => {
@@ -324,6 +366,27 @@ export const BillingController = {
       Number(req.query.pageSize) || 20,
     );
     res.status(result.code).json(result.data);
+  },
+  adminUserUsageExport: async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const filters = usageReportFilters(req);
+      const format = req.query.format === "details" ? "details" : "summary";
+      const report = await loadUsageReport(filters);
+      const content = format === "details"
+        ? buildUsageDetailsCsv(report.details, filters.timezone)
+        : buildUsageSummaryCsv(report.summaries);
+      const date = filters.from.toISOString().slice(0, 10);
+      res.setHeader("Content-Type", "text/csv; charset=utf-8");
+      res.setHeader("Content-Disposition", `attachment; filename="ebma-user-usage-${format}-${date}.csv"`);
+      res.setHeader("Cache-Control", "private, no-store");
+      res.status(200).send(content);
+    } catch (error) {
+      if (error instanceof UsageReportInputError) {
+        res.status(400).json({ success: false, message: error.message, data: null });
+        return;
+      }
+      next(error);
+    }
   },
   adminSignupFreeCredits: async (req: Request, res: Response) => {
     const result = req.method === "GET"

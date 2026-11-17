@@ -1,5 +1,5 @@
 import { audioMimeTypeByFormat } from "./tts.helper";
-import { applyEmotionPrefix } from "./tts.emotion";
+import { applyEmotionPrefix, applyLaughterTags } from "./tts.emotion";
 import { observeGpuCall } from "../observability/observability.provider";
 
 const DEFAULT_TIMEOUT_MS = 60_000;
@@ -177,7 +177,7 @@ export const getTtsModelHealth = async () => {
  */
 const buildSpeechRequestBody = (input: TtsModelInput, stream: boolean) => {
   const body: Record<string, unknown> = {
-    input: applyEmotionPrefix(input.text, input.emotion),
+    input: applyLaughterTags(applyEmotionPrefix(input.text, input.emotion)),
     stream,
     temperature: floatFromEnvironment("TTS_MODEL_TEMPERATURE", DEFAULT_TEMPERATURE),
     top_k: positiveIntegerFromEnvironment("TTS_MODEL_TOP_K", DEFAULT_TOP_K),

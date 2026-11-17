@@ -35,7 +35,7 @@ export type TtsStyleTag = {
   label: string;
   /** Exact token inserted into `input`. */
   token: string;
-  /** Emotion/style/speed colour the span they start; pause/sfx are point inserts. */
+  /** Emotion/style/speed/pitch set delivery for the whole request (put them first); pause/sfx go inline where they happen. */
   kind: "emotion" | "style" | "speed" | "pause" | "sfx";
 };
 
@@ -78,14 +78,14 @@ export const TTS_STYLE_TAG_GROUPS: TtsStyleTagGroup[] = [
   //   label: "SPEED AND PITCH",
   //   tags: (
   //     [
-  //       ["speed-very-slow", "speed very slow", "<|speed:very_slow|>"],
-  //       ["speed-slow", "speed slow", "<|speed:slow|>"],
-  //       ["speed-fast", "speed fast", "<|speed:fast|>"],
-  //       ["speed-very-fast", "speed very fast", "<|speed:very_fast|>"],
-  //       ["pitch-low", "pitch low", "<|pitch:low|>"],
-  //       ["pitch-high", "pitch high", "<|pitch:high|>"],
-  //       ["expressive-high", "expressive high", "<|expressive:high|>"],
-  //       ["expressive-low", "expressive low", "<|expressive:low|>"],
+  //       ["speed-very-slow", "speed very slow", "<|prosody:speed_very_slow|>"],
+  //       ["speed-slow", "speed slow", "<|prosody:speed_slow|>"],
+  //       ["speed-fast", "speed fast", "<|prosody:speed_fast|>"],
+  //       ["speed-very-fast", "speed very fast", "<|prosody:speed_very_fast|>"],
+  //       ["pitch-low", "pitch low", "<|prosody:pitch_low|>"],
+  //       ["pitch-high", "pitch high", "<|prosody:pitch_high|>"],
+  //       ["expressive-high", "expressive high", "<|prosody:expressive_high|>"],
+  //       ["expressive-low", "expressive low", "<|prosody:expressive_low|>"],
   //     ] as const
   //   ).map(([id, label, token]) => ({
   //     id,
@@ -99,8 +99,8 @@ export const TTS_STYLE_TAG_GROUPS: TtsStyleTagGroup[] = [
   //   label: "PAUSES",
   //   tags: (
   //     [
-  //       ["pause", "pause", "<|pause|>"],
-  //       ["long-pause", "long pause", "<|long_pause|>"],
+  //       ["pause", "pause", "<|prosody:pause|>"],
+  //       ["long-pause", "long pause", "<|prosody:long_pause|>"],
   //     ] as const
   //   ).map(([id, label, token]) => ({
   //     id,
@@ -127,7 +127,7 @@ export const TTS_STYLE_TAG_GROUPS: TtsStyleTagGroup[] = [
   //   ).map((name) => ({
   //     id: `sfx-${name}`,
   //     label: name,
-  //     token: `<|${name}|>`,
+  //     token: `<|sfx:${name}|>`,
   //     kind: "sfx" as const,
   //   })),
   // },
@@ -159,3 +159,32 @@ export const applyEmotionPrefix = (text: string, emotion?: string | null) => {
   const withoutOldEmotion = text.replace(LEADING_EMOTION_TAG_RE, "").trimStart();
   return `<|emotion:${emotion}|>${withoutOldEmotion}`;
 };
+
+export const LAUGHTER_TAG = "<|sfx:laughter|>";
+
+// A letter or combining mark: keeps matches to whole words, so हाँ ("yes") and हँसी ("laughter") are left alone.
+const LETTER = "[\\p{L}\\p{M}]";
+const DEVANAGARI_LAUGH_UNIT = "(?:हा|ह[ँं]|ही|हे)";
+/**
+ * Written laughs: two or more repeated syllables, e.g. हाहाहा, हँहँ, हंहं, हीही, हेहे, "हा हा हा",
+ * Haha, hahaha, hehe, hihi. One syllable alone (हा, हे, ha) is a normal word and does not match.
+ */
+const WRITTEN_LAUGH_RE = new RegExp(
+  `(?<!${LETTER})(?<!${LAUGHTER_TAG.replace(/[|]/g, "\\|")}\\s*)` +
+    `(?:${DEVANAGARI_LAUGH_UNIT}(?:[\\s-]?${DEVANAGARI_LAUGH_UNIT})+|(?:ha|he|hi){2,}h?)` +
+    `(?!${LETTER})`,
+  "giu",
+);
+
+export const isLaughterTaggingEnabled = () =>
+  process.env.TTS_AUTO_LAUGHTER_TAG?.trim().toLowerCase() !== "false";
+
+/**
+ * Puts `<|sfx:laughter|>` right before each written laugh, so the model laughs instead of
+ * reading the word aloud. The model's docs ask for the tag *with* the onomatopoeia after it
+ * (`<|sfx:laughter|>Haha`), so the laugh word is kept. Laughs already tagged are left as they are.
+ */
+export const applyLaughterTags = (text: string) =>
+  isLaughterTaggingEnabled()
+    ? text.replace(WRITTEN_LAUGH_RE, (laugh) => `${LAUGHTER_TAG}${laugh}`)
+    : text;

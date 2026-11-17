@@ -23,6 +23,8 @@ app.use("/api/v1/billing/webhook/razorpay", express.raw({ type: "application/jso
 app.post("/api/v1/billing/webhook/razorpay", (req, res) =>
   void BillingController.razorpayWebhook(req, res),
 );
+// Voice agent webhook is HMAC-signed over the exact bytes: keep the raw body.
+app.use("/api/v1/voice/agent-events", express.raw({ type: "application/json", limit: "64kb" }));
 // Needed so req.ip / X-Forwarded-For resolve correctly behind proxies.
 app.set("trust proxy", 1);
 

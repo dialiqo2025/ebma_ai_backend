@@ -9,7 +9,7 @@ export const chatLanguageName = (code: string) =>
 
 const describeLanguage = (code: string) => `${chatLanguageName(code)} (code "${code}")`;
 
-const replyLanguageRule = ({ language, replyLanguage }: Pick<ChatMessage, "language" | "replyLanguage">) => {
+export const replyLanguageRule = ({ language, replyLanguage }: Pick<ChatMessage, "language" | "replyLanguage">) => {
   if (replyLanguage !== "auto") {
     return `Always reply in ${describeLanguage(replyLanguage)}, whatever language the user writes in.`;
   }

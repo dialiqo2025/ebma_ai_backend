@@ -25,6 +25,7 @@ import {
 } from "./stt.helper";
 import {
   buildArabicWsUrlBase,
+  publicSttWsUrl,
   checkArabicAvailability,
   createTranscriptionJob,
   deleteTranscriptionJob,
@@ -349,8 +350,8 @@ export const createSttBrowserToken = async (
     if (!updated) throw new Error("STT session token update failed");
 
     const wsUrl = isArabicSttLanguage(session.language)
-      ? buildArabicWsUrlBase()
-      : token.ws_url;
+      ? publicSttWsUrl(buildArabicWsUrlBase(), "arabic")
+      : publicSttWsUrl(token.ws_url, "indic");
 
     return GenResObj(Code.OK, true, "STT browser token created successfully", {
       session: serializeSttSession(updated),
@@ -873,7 +874,7 @@ export const startArabicTranscription = async (
       transcription: serializeSttTranscription(row),
       connection: {
         token: token.token,
-        wsUrl: buildArabicWsUrlBase(),
+        wsUrl: publicSttWsUrl(buildArabicWsUrlBase(), "arabic"),
         expiresIn: token.expires_in,
         expiresAt: token.expires_at,
       },

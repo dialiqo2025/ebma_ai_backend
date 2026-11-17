@@ -100,6 +100,18 @@ export const buildArabicWsUrlBase = () => {
   return base;
 };
 
+/**
+ * WebSocket URL handed to browsers. The GPU firewall only admits the portal
+ * server, so when EBMA_ASR_PUBLIC_WS_URL is set (e.g. wss://api.ebma.ai/asr)
+ * browsers connect through its nginx proxy at <base>/ws or <base>/ar/ws.
+ * Unset, the upstream URL is returned unchanged.
+ */
+export const publicSttWsUrl = (upstreamUrl: string, kind: "indic" | "arabic") => {
+  const base = stripUrl(process.env.EBMA_ASR_PUBLIC_WS_URL || "");
+  if (!base) return upstreamUrl;
+  return `${base}${kind === "arabic" ? "/ar/ws" : "/ws"}`;
+};
+
 export type ArabicAvailability = {
   available: boolean;
   statusCode: number;

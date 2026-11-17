@@ -196,6 +196,7 @@ export const serializeTtsGeneration = (generation: any) => ({
   text: generation.input_text,
   language: generation.language,
   voiceMode: generation.voice_mode,
+  voicePreset: generation.voice_mode === "default" ? (generation.voice_preset ?? "violet") : null,
   voiceId: generation.voice_id,
   hasReferenceSample: Boolean(generation.reference_audio_file_name),
   referenceText: generation.reference_text ?? null,

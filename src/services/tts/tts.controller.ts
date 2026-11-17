@@ -5,6 +5,7 @@ import {
   createTtsGenerationValidator,
   listTtsGenerationsValidator,
   ttsGenerationUuidValidator,
+  ttsVoicePresetIdValidator,
   updateTtsGenerationValidator,
 } from "./tts.validate";
 
@@ -22,6 +23,20 @@ export const TtsController = {
   health: async (_req: Request, res: Response, next: NextFunction) => {
     try {
       sendProviderResponse(res, await TtsProvider.getTtsHealth());
+    } catch (error) {
+      next(error);
+    }
+  },
+
+  voicePresetPreview: async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const presetId = ttsVoicePresetIdValidator.parse(req.params.preset_id);
+      const language = typeof req.query.language === "string" ? req.query.language.slice(0, 32) : "en";
+      const preview = await TtsProvider.getTtsVoicePresetPreview(presetId, language);
+      res.setHeader("Content-Type", preview.mimeType || "audio/wav");
+      res.setHeader("Content-Length", String(preview.audio.length));
+      res.setHeader("Cache-Control", "private, max-age=86400");
+      res.status(200).send(preview.audio);
     } catch (error) {
       next(error);
     }

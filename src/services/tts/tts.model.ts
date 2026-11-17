@@ -12,6 +12,7 @@ type TtsModelInput = {
   language: string;
   voiceMode: "default" | "clone";
   voiceId?: string;
+  seed?: number;
   /** Applied as `<|emotion:NAME|>` prefix on `input` for the GPU model. */
   emotion?: string | null;
   /** Clone reference audio (raw base64, no data-URL prefix) → GPU `reference.audio_base64`. */
@@ -187,6 +188,10 @@ const buildSpeechRequestBody = (input: TtsModelInput, stream: boolean) => {
       audio_base64: input.referenceAudioBase64,
       text: input.referenceText ?? "",
     };
+  }
+
+  if (input.voiceMode === "default" && Number.isInteger(input.seed)) {
+    body.seed = input.seed;
   }
 
   return body;

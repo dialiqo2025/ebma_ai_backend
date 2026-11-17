@@ -88,6 +88,7 @@ Authorization: Bearer <access-token>
 | Method | Route | Purpose |
 |---|---|---|
 | `GET` | `/api/v1/tts/options` | Frontend limits and runtime availability |
+| `GET` | `/api/v1/tts/voice-presets/:preset_id/preview` | Preview a system voice in the requested language |
 | `POST` | `/api/v1/tts/generations` | Create a generation request |
 | `GET` | `/api/v1/tts/generations` | List the signed-in user's history |
 | `GET` | `/api/v1/tts/generations/:generation_uuid` | Get one request |
@@ -104,13 +105,17 @@ Create payload:
   "text": "नमस्ते, आप कैसे हैं?",
   "language": "hi",
   "voiceMode": "default",
+  "voicePreset": "violet",
   "speed": 1,
   "pitch": 1,
   "outputFormat": "wav"
 }
 ```
 
-For cloned voices, send `"voiceMode": "clone"` and a non-empty `voiceId`.
+For the system voice, `voicePreset` accepts `violet`, `indigo`, `aurora`, or `ember` and
+defaults to `violet`. Each preset maps to a stable model seed, so repeated generations use
+the same voice identity. For cloned voices, send `"voiceMode": "clone"` and a non-empty
+`voiceId`; system presets do not alter the clone flow.
 Text is limited to 1,500 characters; speed and pitch accept values from 0.5 to 1.5.
 
 List query parameters are `page`, `page_size` (maximum 100), `status`, `language`, and
@@ -138,6 +143,7 @@ The adapter in `src/services/tts/tts.model.ts` sends:
   "top_k": 50,
   "language": "en",
   "voice_mode": "default",
+  "seed": 42,
   "speed": 1,
   "pitch": 1,
   "output_format": "wav"

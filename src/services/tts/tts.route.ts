@@ -32,6 +32,7 @@ router.get("/voices/:voice_uuid/audio", authenticated, TtsVoiceController.audio)
 
 router.get("/options", authenticated, TtsController.options);
 router.get("/health", authenticated, TtsController.health);
+router.get("/voice-presets/:preset_id/preview", authenticated, TtsController.voicePresetPreview);
 router.post(
   "/generations",
   authenticated,

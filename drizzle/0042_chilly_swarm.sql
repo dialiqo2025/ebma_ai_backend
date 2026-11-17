@@ -1,0 +1,1 @@
+ALTER TABLE "tts_generations" ADD COLUMN "voice_preset" varchar(32);

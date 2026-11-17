@@ -27,6 +27,7 @@ export const TtsGenerations = pgTable("tts_generations", {
   input_text: text("input_text").notNull(),
   language: varchar("language", { length: 32 }).default("auto").notNull(),
   voice_mode: ttsVoiceModeEnum("voice_mode").default("default").notNull(),
+  voice_preset: varchar("voice_preset", { length: 32 }),
   voice_id: varchar("voice_id", { length: 255 }),
   /** Clone reference sample on disk (sent to GPU as `reference.audio_base64`). */
   reference_audio_file_name: varchar("reference_audio_file_name", { length: 255 }),

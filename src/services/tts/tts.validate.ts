@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { TTS_EMOTIONS } from "./tts.emotion";
+import { TTS_VOICE_PRESET_IDS } from "./tts.voice-presets";
 
 const languageValidator = z
   .string()
@@ -30,6 +31,7 @@ const ttsFields = {
     .max(1500, "Text must be at most 1500 characters"),
   language: languageValidator.default("auto"),
   voiceMode: z.enum(["default", "clone"]).default("default"),
+  voicePreset: z.enum(TTS_VOICE_PRESET_IDS).optional(),
   /** Owned voice UUID from the user's reusable voice library. */
   voiceId: z.string().uuid("Invalid saved voice ID").optional(),
   sampleTranscript: sampleTranscriptField,
@@ -46,6 +48,7 @@ export const updateTtsGenerationValidator = z
     text: ttsFields.text.optional(),
     language: languageValidator.optional(),
     voiceMode: z.enum(["default", "clone"]).optional(),
+    voicePreset: z.enum(TTS_VOICE_PRESET_IDS).nullable().optional(),
     voiceId: z.string().uuid("Invalid saved voice ID").nullable().optional(),
     sampleTranscript: sampleTranscriptField,
     emotion: emotionField,
@@ -57,6 +60,7 @@ export const updateTtsGenerationValidator = z
   .refine((payload) => Object.keys(payload).length > 0, "At least one field is required");
 
 export const ttsGenerationUuidValidator = z.string().uuid("Invalid generation UUID");
+export const ttsVoicePresetIdValidator = z.enum(TTS_VOICE_PRESET_IDS);
 
 export const listTtsGenerationsValidator = z.object({
   page: z.coerce.number().int().min(1).default(1),

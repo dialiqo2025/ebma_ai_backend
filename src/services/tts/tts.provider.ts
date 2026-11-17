@@ -36,6 +36,15 @@ import type {
   ListTtsGenerations,
   UpdateTtsGeneration,
 } from "./tts.validate";
+import {
+  DEFAULT_TTS_VOICE_PRESET,
+  getTtsVoicePreset,
+  publicTtsVoicePresets,
+  ttsVoicePresetPreviewText,
+  type TtsVoicePresetId,
+} from "./tts.voice-presets";
+
+const voicePresetPreviewCache = new Map<string, Promise<{ audio: Buffer; mimeType: string }>>();
 
 const findOwnedGeneration = async (generationUuid: string, userUuid: string) => {
   const [generation] = await db
@@ -174,6 +183,9 @@ export const createTtsGeneration = async (
       input_text: payload.text,
       language: payload.language,
       voice_mode: payload.voiceMode,
+      voice_preset: payload.voiceMode === "default"
+        ? (payload.voicePreset ?? DEFAULT_TTS_VOICE_PRESET)
+        : null,
       voice_id: payload.voiceMode === "clone" ? (payload.voiceId ?? null) : null,
       reference_text:
         payload.voiceMode === "clone" ? (payload.sampleTranscript ?? "") : null,
@@ -312,6 +324,9 @@ export const updateTtsGeneration = async (
       : payload.voiceId === undefined
         ? existing.voice_id
         : payload.voiceId;
+  const resultingVoicePreset = resultingVoiceMode === "default"
+    ? (payload.voicePreset ?? existing.voice_preset ?? DEFAULT_TTS_VOICE_PRESET)
+    : null;
 
   if (
     resultingVoiceMode === "clone" &&
@@ -344,6 +359,9 @@ export const updateTtsGeneration = async (
       ...(payload.text !== undefined ? { input_text: payload.text } : {}),
       ...(payload.language !== undefined ? { language: payload.language } : {}),
       ...(payload.voiceMode !== undefined ? { voice_mode: payload.voiceMode } : {}),
+      ...(payload.voiceMode !== undefined || payload.voicePreset !== undefined
+        ? { voice_preset: resultingVoicePreset }
+        : {}),
       ...(payload.voiceMode !== undefined || payload.voiceId !== undefined
         ? { voice_id: resultingVoiceId }
         : {}),
@@ -480,6 +498,9 @@ export const generateTtsAudio = async (generationUuid: string, userUuid: string)
       language: claimed.language,
       voiceMode: claimed.voice_mode,
       ...(claimed.voice_id ? { voiceId: claimed.voice_id } : {}),
+      ...(claimed.voice_mode === "default"
+        ? { seed: getTtsVoicePreset(claimed.voice_preset).seed }
+        : {}),
       emotion: claimed.emotion,
       ...cloneReference,
       speed: claimed.speed,
@@ -729,6 +750,9 @@ export const prepareTtsStream = async (
       language: claimed.language,
       voiceMode: claimed.voice_mode,
       ...(claimed.voice_id ? { voiceId: claimed.voice_id } : {}),
+      ...(claimed.voice_mode === "default"
+        ? { seed: getTtsVoicePreset(claimed.voice_preset).seed }
+        : {}),
       emotion: claimed.emotion,
       ...cloneReference,
       speed: claimed.speed,
@@ -809,6 +833,8 @@ export const getTtsOptions = () =>
     maxTextCharacters: 1500,
     languages: "model-dependent",
     voiceModes: ["default", "clone"],
+    defaultVoicePreset: DEFAULT_TTS_VOICE_PRESET,
+    voicePresets: publicTtsVoicePresets(),
     audioFormats: ["wav", "mp3", "ogg"],
     emotions: TTS_EMOTION_OPTIONS,
     styleTags: TTS_STYLE_TAG_GROUPS,
@@ -834,6 +860,27 @@ export const getTtsOptions = () =>
       channels: Number(process.env.TTS_STREAM_CHANNELS) || 1,
     },
   });
+
+export const getTtsVoicePresetPreview = async (presetId: TtsVoicePresetId, requestedLanguage: string) => {
+  const preset = getTtsVoicePreset(presetId);
+  const preview = ttsVoicePresetPreviewText(requestedLanguage);
+  const cacheKey = `${preset.id}:${preview.language}`;
+  let pending = voicePresetPreviewCache.get(cacheKey);
+  if (!pending) {
+    pending = synthesizeWithTtsModel({
+      text: preview.text,
+      language: preview.language,
+      voiceMode: "default",
+      seed: preset.seed,
+      speed: 1,
+      pitch: 1,
+      outputFormat: "wav",
+    }).then(({ audio, mimeType }) => ({ audio, mimeType }));
+    voicePresetPreviewCache.set(cacheKey, pending);
+    pending.catch(() => voicePresetPreviewCache.delete(cacheKey));
+  }
+  return pending;
+};
 
 export const getTtsHealth = async () => {
   try {

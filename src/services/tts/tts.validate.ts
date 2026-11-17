@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { TTS_EMOTIONS } from "./tts.emotion";
+import { findInvalidTags, invalidTagMessage, TTS_EMOTIONS } from "./tts.emotion";
 import { TTS_VOICE_PRESET_IDS } from "./tts.voice-presets";
 
 const languageValidator = z
@@ -28,7 +28,11 @@ const ttsFields = {
     .string()
     .trim()
     .min(1, "Text is required")
-    .max(1500, "Text must be at most 1500 characters"),
+    .max(1500, "Text must be at most 1500 characters")
+    .superRefine((text, ctx) => {
+      const invalid = findInvalidTags(text);
+      if (invalid.length) ctx.addIssue({ code: "custom", message: invalidTagMessage(invalid) });
+    }),
   language: languageValidator.default("auto"),
   voiceMode: z.enum(["default", "clone"]).default("default"),
   voicePreset: z.enum(TTS_VOICE_PRESET_IDS).optional(),

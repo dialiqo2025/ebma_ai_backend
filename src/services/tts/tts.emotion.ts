@@ -188,3 +188,140 @@ export const applyLaughterTags = (text: string) =>
   isLaughterTaggingEnabled()
     ? text.replace(WRITTEN_LAUGH_RE, (laugh) => `${LAUGHTER_TAG}${laugh}`)
     : text;
+
+/* ------------------------------------------------------------------------------------------------
+ * Inline control tags, as documented by the Higgs model (`<|category:value|>`).
+ * Delivery tags (emotion, style, prosody speed / pitch / expressive) set how a whole request is
+ * spoken, so a text that changes delivery midway is split into parts, one model request each.
+ * Positional tags (prosody pause / long_pause, sfx) work where they are and stay inside their part.
+ * ---------------------------------------------------------------------------------------------- */
+
+export const TTS_STYLES = ["singing", "shouting", "whispering"] as const;
+export const TTS_PROSODY_DELIVERY = [
+  "speed_very_slow",
+  "speed_slow",
+  "speed_fast",
+  "speed_very_fast",
+  "pitch_low",
+  "pitch_high",
+  "expressive_high",
+  "expressive_low",
+] as const;
+export const TTS_PROSODY_INLINE = ["pause", "long_pause"] as const;
+export const TTS_SFX = [
+  "cough",
+  "laughter",
+  "crying",
+  "screaming",
+  "burping",
+  "humming",
+  "sigh",
+  "sniff",
+  "sneeze",
+] as const;
+
+const KNOWN_TAG_VALUES: Record<string, readonly string[]> = {
+  emotion: TTS_EMOTIONS,
+  style: TTS_STYLES,
+  prosody: [...TTS_PROSODY_DELIVERY, ...TTS_PROSODY_INLINE],
+  sfx: TTS_SFX,
+};
+
+const ANY_TAG_RE = /<\|([^<>|]*)\|>/g;
+
+/** Every `<|…|>` in the text that the model does not know, e.g. `<|emotion:happy|>`. */
+export const findInvalidTags = (text: string): string[] => {
+  const invalid = new Set<string>();
+  for (const match of text.matchAll(ANY_TAG_RE)) {
+    const [category, value, ...rest] = (match[1] ?? "").split(":");
+    const known = category ? KNOWN_TAG_VALUES[category] : undefined;
+    if (rest.length || !known || !value || !known.includes(value)) invalid.add(match[0]);
+  }
+  return [...invalid];
+};
+
+export const invalidTagMessage = (tags: string[]) =>
+  `Unknown control tag${tags.length > 1 ? "s" : ""}: ${tags.join(", ")}. ` +
+  "Use <|emotion:NAME|>, <|style:NAME|>, <|prosody:NAME|> or <|sfx:NAME|> with a supported name " +
+  "(see styleTags in GET /tts/options).";
+
+/** Delivery slot a tag occupies; a new tag replaces the previous one in the same slot. */
+type DeliverySlot = "emotion" | "style" | "speed" | "pitch" | "expressive";
+const SLOT_ORDER: DeliverySlot[] = ["emotion", "style", "speed", "pitch", "expressive"];
+
+const deliverySlot = (category: string, value: string): DeliverySlot | null => {
+  if (category === "emotion" && isTtsEmotion(value)) return "emotion";
+  if (category === "style" && (TTS_STYLES as readonly string[]).includes(value)) return "style";
+  if (category === "prosody" && (TTS_PROSODY_DELIVERY as readonly string[]).includes(value)) {
+    return value.split("_")[0] as DeliverySlot;
+  }
+  return null;
+};
+
+export type DeliveryPart = {
+  /** Delivery tags in force for this part, e.g. `<|emotion:anger|><|style:whispering|>`. */
+  delivery: string;
+  /** The words of this part, with any positional tags (pause, sfx) still inline. */
+  text: string;
+};
+
+/** True when a piece of text has something to say, not just spaces, punctuation or positional tags. */
+const hasSpeech = (text: string) => /[\p{L}\p{N}]/u.test(text.replace(ANY_TAG_RE, ""));
+
+export const ttsMaxDeliveryParts = () => {
+  const value = Number(process.env.TTS_MAX_DELIVERY_PARTS);
+  return Number.isInteger(value) && value >= 1 ? value : 8;
+};
+
+/**
+ * Splits text at every delivery tag. Each part carries all delivery tags in force at its start:
+ * a new emotion replaces the previous emotion, while an earlier style (or speed, pitch, expressive)
+ * stays on. Tags in a row count as one switch; a stretch with nothing to say is folded into its
+ * neighbour. `baseEmotion` (the request's `emotion` field) is the starting emotion.
+ * Beyond `TTS_MAX_DELIVERY_PARTS`, the rest of the text joins the last allowed part.
+ */
+export const splitIntoDeliveryParts = (
+  text: string,
+  baseEmotion?: string | null,
+): DeliveryPart[] => {
+  const active = new Map<DeliverySlot, string>();
+  if (baseEmotion && isTtsEmotion(baseEmotion)) active.set("emotion", `<|emotion:${baseEmotion}|>`);
+  const deliveryNow = () =>
+    SLOT_ORDER.map((slot) => active.get(slot)).filter(Boolean).join("");
+
+  const parts: DeliveryPart[] = [];
+  let body = "";
+  let bodyDelivery = deliveryNow();
+  let last = 0;
+
+  for (const match of text.matchAll(ANY_TAG_RE)) {
+    const [category = "", value = ""] = (match[1] ?? "").split(":");
+    const slot = deliverySlot(category, value);
+    if (!slot) continue; // positional or unknown tag: stays in the text
+
+    body += text.slice(last, match.index);
+    last = match.index! + match[0].length;
+    if (hasSpeech(body)) {
+      parts.push({ delivery: bodyDelivery, text: body.trim() });
+      body = "";
+    }
+    // Text with nothing to say yet (spaces, punctuation, a pause) moves on with the new delivery.
+    active.set(slot, match[0]);
+    bodyDelivery = deliveryNow();
+  }
+  body += text.slice(last);
+  if (hasSpeech(body) || !parts.length) {
+    parts.push({ delivery: bodyDelivery, text: body.trim() });
+  } else if (body.trim()) {
+    parts[parts.length - 1]!.text += body.trimEnd();
+  }
+
+  const max = ttsMaxDeliveryParts();
+  if (parts.length > max) {
+    const kept = parts.slice(0, max);
+    kept[max - 1]!.text = [kept[max - 1]!.text, ...parts.slice(max).map((part) => part.text)].join(" ");
+    console.warn(`TTS text has ${parts.length} delivery changes; only the first ${max} are applied`);
+    return kept;
+  }
+  return parts;
+};

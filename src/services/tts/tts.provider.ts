@@ -23,11 +23,20 @@ import {
 import {
   getTtsModelHealth,
   openTtsModelStream,
+  openTtsPartsStream,
+  synthesizeParts,
   synthesizeWithTtsModel,
   TtsModelError,
+  type TtsModelOutput,
   type TtsModelStream,
+  type TtsPartsBase,
 } from "./tts.model";
-import { TTS_EMOTION_OPTIONS, TTS_STYLE_TAG_GROUPS } from "./tts.emotion";
+import {
+  splitIntoDeliveryParts,
+  ttsMaxDeliveryParts,
+  TTS_EMOTION_OPTIONS,
+  TTS_STYLE_TAG_GROUPS,
+} from "./tts.emotion";
 import { ttsCloneSampleMaxBytes } from "./tts.upload";
 import { recordUsage } from "../billing/billing.provider";
 import { currentRequestContext } from "../observability/observability.context";
@@ -106,6 +115,47 @@ const resolveCloneReferenceForModel = async (generation: {
       "clone_sample_missing",
       422,
     );
+  }
+};
+
+/**
+ * Settings shared by every part of a text whose delivery changes midway. All parts must sound
+ * like one speaker, so they all get the same voice sample: the clone sample for cloned voices,
+ * or the preset's preview clip (the voice the user picked) for default voices. If the preview
+ * cannot be made, parts fall back to the preset seed alone.
+ */
+const multiPartBase = async (
+  generation: typeof TtsGenerations.$inferSelect,
+  cloneReference: { referenceAudioBase64?: string; referenceText?: string },
+): Promise<TtsPartsBase> => {
+  const base: TtsPartsBase = {
+    language: generation.language,
+    voiceMode: generation.voice_mode,
+    ...(generation.voice_id ? { voiceId: generation.voice_id } : {}),
+    ...(generation.voice_mode === "default"
+      ? { seed: getTtsVoicePreset(generation.voice_preset).seed }
+      : {}),
+    ...cloneReference,
+    speed: generation.speed,
+    pitch: generation.pitch,
+    outputFormat: generation.audio_format,
+  };
+  if (generation.voice_mode !== "default" || base.referenceAudioBase64) return base;
+
+  try {
+    const preset = getTtsVoicePreset(generation.voice_preset);
+    const preview = await getTtsVoicePresetPreview(preset.id, generation.language);
+    return {
+      ...base,
+      referenceAudioBase64: preview.audio.toString("base64"),
+      referenceText: ttsVoicePresetPreviewText(generation.language).text,
+    };
+  } catch (error) {
+    console.warn(
+      "TTS multi-part: preset preview unavailable, parts use the seed only",
+      error instanceof Error ? error.message : error,
+    );
+    return base;
   }
 };
 
@@ -482,31 +532,42 @@ export const generateTtsAudio = async (generationUuid: string, userUuid: string)
   let savedFileName: string | null = null;
 
   try {
-    const llmText =
-      process.env.LLM_MODEL_ENDPOINT && process.env.LLM_API_KEY
-        ? (await prepareTextForTts({
-            text: claimed.input_text,
-            language: claimed.language,
-            style: "natural",
-          })).data?.data?.text
-        : claimed.input_text;
-
+    const parts = splitIntoDeliveryParts(claimed.input_text, claimed.emotion);
     const cloneReference = await resolveCloneReferenceForModel(claimed);
+    let output: TtsModelOutput;
 
-    const output = await synthesizeWithTtsModel({
-      text: typeof llmText === "string" ? llmText : claimed.input_text,
-      language: claimed.language,
-      voiceMode: claimed.voice_mode,
-      ...(claimed.voice_id ? { voiceId: claimed.voice_id } : {}),
-      ...(claimed.voice_mode === "default"
-        ? { seed: getTtsVoicePreset(claimed.voice_preset).seed }
-        : {}),
-      emotion: claimed.emotion,
-      ...cloneReference,
-      speed: claimed.speed,
-      pitch: claimed.pitch,
-      outputFormat: claimed.audio_format,
-    });
+    if (parts.length > 1) {
+      // Delivery changes midway: one request per part, joined. The LLM rewrite is skipped here
+      // because it breaks the inline tags (and drops written laughs) the parts depend on.
+      output = await synthesizeParts(
+        await multiPartBase(claimed, cloneReference),
+        parts,
+      );
+    } else {
+      const llmText =
+        process.env.LLM_MODEL_ENDPOINT && process.env.LLM_API_KEY
+          ? (await prepareTextForTts({
+              text: claimed.input_text,
+              language: claimed.language,
+              style: "natural",
+            })).data?.data?.text
+          : claimed.input_text;
+
+      output = await synthesizeWithTtsModel({
+        text: typeof llmText === "string" ? llmText : claimed.input_text,
+        language: claimed.language,
+        voiceMode: claimed.voice_mode,
+        ...(claimed.voice_id ? { voiceId: claimed.voice_id } : {}),
+        ...(claimed.voice_mode === "default"
+          ? { seed: getTtsVoicePreset(claimed.voice_preset).seed }
+          : {}),
+        emotion: claimed.emotion,
+        ...cloneReference,
+        speed: claimed.speed,
+        pitch: claimed.pitch,
+        outputFormat: claimed.audio_format,
+      });
+    }
 
     savedFileName = await saveTtsAudio(
       claimed.generation_uuid,
@@ -744,21 +805,25 @@ export const prepareTtsStream = async (
   try {
     // Skip LLM polish on the stream path so first audio byte arrives ASAP.
     const cloneReference = await resolveCloneReferenceForModel(claimed);
+    const parts = splitIntoDeliveryParts(claimed.input_text, claimed.emotion);
 
-    const stream = await openTtsModelStream({
-      text: claimed.input_text,
-      language: claimed.language,
-      voiceMode: claimed.voice_mode,
-      ...(claimed.voice_id ? { voiceId: claimed.voice_id } : {}),
-      ...(claimed.voice_mode === "default"
-        ? { seed: getTtsVoicePreset(claimed.voice_preset).seed }
-        : {}),
-      emotion: claimed.emotion,
-      ...cloneReference,
-      speed: claimed.speed,
-      pitch: claimed.pitch,
-      outputFormat: claimed.audio_format,
-    });
+    const stream =
+      parts.length > 1
+        ? await openTtsPartsStream(await multiPartBase(claimed, cloneReference), parts)
+        : await openTtsModelStream({
+            text: claimed.input_text,
+            language: claimed.language,
+            voiceMode: claimed.voice_mode,
+            ...(claimed.voice_id ? { voiceId: claimed.voice_id } : {}),
+            ...(claimed.voice_mode === "default"
+              ? { seed: getTtsVoicePreset(claimed.voice_preset).seed }
+              : {}),
+            emotion: claimed.emotion,
+            ...cloneReference,
+            speed: claimed.speed,
+            pitch: claimed.pitch,
+            outputFormat: claimed.audio_format,
+          });
 
     return {
       stream,
@@ -838,6 +903,8 @@ export const getTtsOptions = () =>
     audioFormats: ["wav", "mp3", "ogg"],
     emotions: TTS_EMOTION_OPTIONS,
     styleTags: TTS_STYLE_TAG_GROUPS,
+    /** Emotion/style tags may be placed mid-text; each change starts a new part, up to this many. */
+    maxDeliveryParts: ttsMaxDeliveryParts(),
     speed: { min: 0.5, max: 1.5, step: 0.1, default: 1 },
     pitch: { min: 0.5, max: 1.5, step: 0.1, default: 1 },
     autoProcess: isTtsAutoProcessEnabled(),

@@ -73,6 +73,53 @@ export const wrapPcmS16leAsWav = (
   return Buffer.concat([header, pcm.subarray(0, dataSize)]);
 };
 
+export type WavPcm = { pcm: Buffer; sampleRate: number; channels: number };
+
+/**
+ * Reads the raw 16-bit PCM and its format out of a WAV file. Tolerates the "unknown length"
+ * data size (0xFFFFFFFF) that streaming servers write, by reading to the end of the buffer.
+ */
+export const readWavPcm = (wav: Buffer): WavPcm => {
+  if (wav.length < 12 || wav.toString("ascii", 0, 4) !== "RIFF" || wav.toString("ascii", 8, 12) !== "WAVE") {
+    throw new Error("Audio is not a WAV file");
+  }
+  let format: { audioFormat: number; channels: number; sampleRate: number; bits: number } | null = null;
+  let offset = 12;
+  while (offset + 8 <= wav.length) {
+    const id = wav.toString("ascii", offset, offset + 4);
+    const size = wav.readUInt32LE(offset + 4);
+    const start = offset + 8;
+    if (id === "fmt " && start + 16 <= wav.length) {
+      format = {
+        audioFormat: wav.readUInt16LE(start),
+        channels: wav.readUInt16LE(start + 2),
+        sampleRate: wav.readUInt32LE(start + 4),
+        bits: wav.readUInt16LE(start + 14),
+      };
+    } else if (id === "data") {
+      if (!format) throw new Error("WAV data comes before its format");
+      // 1 = PCM, 0xFFFE = extensible (PCM for 16-bit)
+      if ((format.audioFormat !== 1 && format.audioFormat !== 0xfffe) || format.bits !== 16) {
+        throw new Error(`Unsupported WAV encoding (format ${format.audioFormat}, ${format.bits}-bit)`);
+      }
+      const end = size === 0xffffffff ? wav.length : Math.min(wav.length, start + size);
+      const blockAlign = format.channels * 2;
+      const usable = end - start - ((end - start) % blockAlign);
+      return {
+        pcm: wav.subarray(start, start + usable),
+        sampleRate: format.sampleRate,
+        channels: format.channels,
+      };
+    }
+    offset = start + size + (size % 2);
+  }
+  throw new Error("WAV file has no audio data");
+};
+
+/** Silent 16-bit PCM of the given length. */
+export const silencePcm = (milliseconds: number, sampleRate: number, channels = 1) =>
+  Buffer.alloc(Math.max(0, Math.round((sampleRate * milliseconds) / 1000)) * channels * 2);
+
 export const saveTtsAudio = async (
   generationUuid: string,
   format: keyof typeof audioMimeTypeByFormat,

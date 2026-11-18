@@ -24,7 +24,8 @@ export const publicTtsVoicePresets = () => presets.map(({ seed: _seed, ...preset
 }));
 
 const previewText: Record<string, string> = {
-  hi: "नमस्ते, यह आपकी चुनी हुई आवाज़ का एक छोटा सा नमूना है।",
+  // hi: "नमस्ते, यह आपकी चुनी हुई आवाज़ का एक छोटा सा नमूना है।",
+  hi: "मैं लंकापति रावण हूँ! तीनों लोक मेरे नाम से काँपते हैं, और तुम एक वानर को मेरे दरबार में भेजते हो?",
   en: "Hello, this is a short preview of your selected voice.",
   ta: "வணக்கம், இது நீங்கள் தேர்ந்தெடுத்த குரலின் சிறிய முன்னோட்டம்.",
   bn: "নমস্কার, এটি আপনার নির্বাচিত কণ্ঠের একটি ছোট নমুনা।",

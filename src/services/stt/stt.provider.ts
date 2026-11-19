@@ -1228,7 +1228,7 @@ export const downloadSttTranscription = async (
   userUuid: string,
   format: "txt" | "srt" | "vtt",
 ) => {
-  const row = await findOwnedTranscription(transcriptionUuid, userUuid);
+  let row = await findOwnedTranscription(transcriptionUuid, userUuid);
   if (!row) {
     return { response: GenResObj(Code.NOT_FOUND, false, "STT transcription not found") };
   }
@@ -1249,6 +1249,8 @@ export const downloadSttTranscription = async (
           ),
         };
       }
+      // The refresh may have just saved Agent/Caller labels; render from the saved row.
+      row = (await findOwnedTranscription(transcriptionUuid, userUuid)) ?? row;
     } else {
       return {
         response: GenResObj(

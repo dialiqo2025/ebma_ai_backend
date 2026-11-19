@@ -189,6 +189,15 @@ export const classifyAgentCaller = async (result: unknown): Promise<SpeakerRoles
 
 const ROLE_LABEL: Record<SpeakerRole, string> = { agent: "Agent", caller: "Caller" };
 
+const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/** Rewrites "<raw id>:" at the start of each line, e.g. "Speaker 1: hi" → "Agent: hi". */
+export const relabelSpeakerText = (text: string, info: SpeakerRolesInfo) =>
+  Object.entries(info.roles).reduce(
+    (out, [rawId, role]) => out.replace(new RegExp(`^(\\s*)${escapeRegExp(rawId)}(?=\\s*:)`, "gm"), `$1${ROLE_LABEL[role]}`),
+    text,
+  );
+
 /** Relabels segments/speakers in a copy of the result; keeps the raw id as speakerId. */
 export const applySpeakerRoles = (result: JsonRecord, info: SpeakerRolesInfo): JsonRecord => {
   const relabel = (item: JsonRecord, keys: string[], labelKey: string) => {
@@ -199,6 +208,8 @@ export const applySpeakerRoles = (result: JsonRecord, info: SpeakerRolesInfo): J
 
   return {
     ...result,
+    // The ASR's plain text ("Speaker 1: …" lines) becomes the API `transcript`, so relabel it too.
+    ...(typeof result.text === "string" ? { text: relabelSpeakerText(result.text, info) } : {}),
     ...(Array.isArray(result.segments)
       ? { segments: result.segments.map((seg) => (isRecord(seg) ? relabel(seg, SEGMENT_SPEAKER_KEYS, "speaker") : seg)) }
       : {}),

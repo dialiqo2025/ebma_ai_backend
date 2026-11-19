@@ -1,5 +1,5 @@
-import { audioMimeTypeByFormat } from "./tts.helper";
-import { applyEmotionPrefix } from "./tts.emotion";
+import { audioMimeTypeByFormat, readWavPcm, silencePcm, wrapPcmS16leAsWav } from "./tts.helper";
+import { applyEmotionPrefix, applyLaughterTags, type DeliveryPart } from "./tts.emotion";
 import { observeGpuCall } from "../observability/observability.provider";
 
 const DEFAULT_TIMEOUT_MS = 60_000;
@@ -35,6 +35,8 @@ export class TtsModelError extends Error {
     message: string,
     public readonly code: string,
     public readonly httpStatus: number,
+    /** Set when the model server is busy and said how long to wait (its Retry-After). */
+    public readonly retryAfterMs?: number,
   ) {
     super(message);
     this.name = "TtsModelError";
@@ -177,13 +179,15 @@ export const getTtsModelHealth = async () => {
  */
 const buildSpeechRequestBody = (input: TtsModelInput, stream: boolean) => {
   const body: Record<string, unknown> = {
-    input: applyEmotionPrefix(input.text, input.emotion),
+    input: applyLaughterTags(applyEmotionPrefix(input.text, input.emotion)),
     stream,
     temperature: floatFromEnvironment("TTS_MODEL_TEMPERATURE", DEFAULT_TEMPERATURE),
     top_k: positiveIntegerFromEnvironment("TTS_MODEL_TOP_K", DEFAULT_TOP_K),
   };
 
-  if (input.voiceMode === "clone" && input.referenceAudioBase64) {
+  // Clone voices always send their sample; default voices send one too when a multi-part text
+  // anchors every part to the same voice (the preset's preview clip).
+  if (input.referenceAudioBase64) {
     body.reference = {
       audio_base64: input.referenceAudioBase64,
       text: input.referenceText ?? "",
@@ -200,6 +204,17 @@ const buildSpeechRequestBody = (input: TtsModelInput, stream: boolean) => {
 const parseUpstreamError = async (response: Response) => {
   const responseText = (await response.text()).slice(0, 500);
   console.error("TTS model request failed", response.status, responseText);
+
+  // The GPU gateway answers 503 "busy" (all slots taken) or 429 (per-client limit) with Retry-After.
+  if (response.status === 503 || response.status === 429) {
+    const retryAfterSeconds = Number(response.headers.get("retry-after"));
+    throw new TtsModelError(
+      "Text-to-speech is busy right now. Please try again in a moment.",
+      "model_busy",
+      503,
+      Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0 ? retryAfterSeconds * 1000 : 2000,
+    );
+  }
 
   // A stopped GPU or a misrouted GPU service commonly responds with its own
   // plain-text 404/405 page. Keep those infrastructure details in server logs,
@@ -404,4 +419,155 @@ export const synthesizeWithTtsModel = async (
     mimeType,
     ...(providerRequestId ? { providerRequestId } : {}),
   };
+};
+
+/* ------------------------------------------------------------------------------------------------
+ * Multi-part synthesis: a text whose delivery changes midway (see splitIntoDeliveryParts) is
+ * spoken as one model request per part, every part with the same voice sample, and the parts are
+ * joined with a short pause. At most two requests per generation run at a time, which keeps a
+ * generation well inside the GPU gateway's limit of concurrent requests.
+ * ---------------------------------------------------------------------------------------------- */
+
+/** Everything about a request except the words: shared by all parts of one generation. */
+export type TtsPartsBase = Omit<TtsModelInput, "text" | "emotion">;
+
+const BUSY_RETRIES = 3;
+
+export const ttsPartGapMs = () => {
+  const value = Number(process.env.TTS_PART_GAP_MS);
+  return Number.isFinite(value) && value >= 0 ? Math.min(value, 2000) : 150;
+};
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Retries a model call that failed only because the GPU gateway was busy. */
+const withBusyRetry = async <T>(call: () => Promise<T>): Promise<T> => {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await call();
+    } catch (error) {
+      if (!(error instanceof TtsModelError) || error.code !== "model_busy" || attempt >= BUSY_RETRIES) {
+        throw error;
+      }
+      await sleep(error.retryAfterMs ?? 2000);
+    }
+  }
+};
+
+const partModelInput = (base: TtsPartsBase, part: DeliveryPart): TtsModelInput => ({
+  ...base,
+  text: `${part.delivery}${part.text}`,
+  emotion: null,
+});
+
+const joinFailure = (detail: string) =>
+  new TtsModelError(`The TTS model returned audio that could not be joined: ${detail}`, "invalid_model_response", 502);
+
+/** Speaks each part (two at a time) and joins them into one WAV. */
+export const synthesizeParts = async (
+  base: TtsPartsBase,
+  parts: DeliveryPart[],
+): Promise<TtsModelOutput> => {
+  const outputs: TtsModelOutput[] = new Array(parts.length);
+  let next = 0;
+  let failed = false;
+  const worker = async () => {
+    while (!failed && next < parts.length) {
+      const index = next++;
+      try {
+        outputs[index] = await withBusyRetry(() => synthesizeWithTtsModel(partModelInput(base, parts[index]!)));
+      } catch (error) {
+        failed = true;
+        throw error;
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(2, parts.length) }, worker));
+
+  const decoded = outputs.map((output, index) => {
+    try {
+      return readWavPcm(output.audio);
+    } catch (error) {
+      throw joinFailure(`part ${index + 1}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  });
+  const { sampleRate, channels } = decoded[0]!;
+  if (decoded.some((part) => part.sampleRate !== sampleRate || part.channels !== channels)) {
+    throw joinFailure("the parts have different sample rates or channel counts");
+  }
+  const gap = silencePcm(ttsPartGapMs(), sampleRate, channels);
+  const pcm = Buffer.concat(decoded.flatMap((part, index) => (index ? [gap, part.pcm] : [part.pcm])));
+  const providerRequestId = outputs[0]?.providerRequestId;
+  return {
+    audio: wrapPcmS16leAsWav(pcm, sampleRate, channels),
+    mimeType: "audio/wav",
+    ...(providerRequestId ? { providerRequestId } : {}),
+  };
+};
+
+/**
+ * One continuous PCM stream for a multi-part text: plays part 1 as it arrives, then a short pause,
+ * then part 2, and so on. The next part's request is opened while the current part is still
+ * streaming, so it is usually ready by the time it is needed. A failure in any part errors the
+ * stream, which the controller turns into a failed generation.
+ */
+export const openTtsPartsStream = async (
+  base: TtsPartsBase,
+  parts: DeliveryPart[],
+): Promise<TtsModelStream> => {
+  const open = (index: number) => {
+    const opening = withBusyRetry(() => openTtsModelStream(partModelInput(base, parts[index]!)));
+    opening.catch(() => undefined); // surfaced when awaited; avoids an unhandled rejection meanwhile
+    return opening;
+  };
+
+  // Part 1 is awaited here, so a model that is down fails before any audio is sent.
+  const first = await open(0);
+  let upcoming: Promise<TtsModelStream> | null = parts.length > 1 ? open(1) : null;
+  let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+  const gap = new Uint8Array(silencePcm(ttsPartGapMs(), first.sampleRate, first.channels));
+
+  async function* audio(): AsyncGenerator<Uint8Array> {
+    let current = first;
+    for (let index = 0; ; index += 1) {
+      reader = current.body.getReader();
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value?.length) yield value;
+      }
+      reader.releaseLock();
+      reader = null;
+      if (index + 1 >= parts.length) return;
+
+      const nextStream = await upcoming!;
+      upcoming = index + 2 < parts.length ? open(index + 2) : null;
+      if (nextStream.sampleRate !== first.sampleRate || nextStream.channels !== first.channels) {
+        await nextStream.body.cancel().catch(() => undefined);
+        throw joinFailure("the parts have different sample rates or channel counts");
+      }
+      if (gap.length) yield gap;
+      current = nextStream;
+    }
+  }
+
+  const chunks = audio();
+  const body = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        const { done, value } = await chunks.next();
+        if (done) controller.close();
+        else controller.enqueue(value);
+      } catch (error) {
+        controller.error(error);
+      }
+    },
+    async cancel() {
+      await reader?.cancel().catch(() => undefined);
+      await upcoming?.then((stream) => stream.body.cancel()).catch(() => undefined);
+      await chunks.return(undefined).catch(() => undefined);
+    },
+  });
+
+  return { ...first, body };
 };
